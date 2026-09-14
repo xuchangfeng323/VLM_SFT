@@ -14,8 +14,12 @@ class QwenVlModel:
             target_modules=[],
         )
         self.model = get_peft_model(self.model, self.lora_config)
-        if hasattr(self.model, ""):
-            
+        if hasattr(self.model, "gradient_checkpointing_enable"):
+            self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+            if hasattr(self.model, "enable_input_require_grads"):
+                self.model.enable_input_require_grads()
+    def get_model(self):
+        return self.model
 
 
         
