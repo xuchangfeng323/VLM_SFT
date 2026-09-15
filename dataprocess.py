@@ -37,7 +37,20 @@ class GroundedMNER(Dataset):
             "assistant_message": assistant_message,
             "image": image
         }
+    def collate_fn(self, batch,is_train=True):
+        images = []
+        scaled_assistant_texts: List[str] = []
+        orig_assistant_texts: List[str] = []
+        orig_sizes: List[Tuple[int, int]] = []
+        valid_batch: List[Dict[str, Any]] = []
+        for x in batch:
+            image = x["image"]
+            height, width = image.size
+            orig_sizes.append((height, width))
             
+
+        
+        
 if __name__ == '__main__':
     
     dataset = GroundedMNER("data/sft/train_sft.jsonl", "data/sft/images")
