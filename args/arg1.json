@@ -6,7 +6,8 @@
     "device": "cuda:0",
     "model_name": "Qwen2.5-7B",
     "model_dir": "/home/model/Qwen2.5-7B/",
-    
+    "min_pixels":200704,
+    "max_pixels":802816,
     "data_path": "./data/",
     "max_length":600 ,
     "max_new_tokens": 300,

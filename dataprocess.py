@@ -1,5 +1,7 @@
 from torch.utils.data import Dataset
 from PIL import Image
+import json
+import os
 class GroundedMNER(Dataset):
     def __init__(self, data_path,image_root):
         self.items: List[Dict[str, Any]] = []
@@ -21,12 +23,26 @@ class GroundedMNER(Dataset):
             if os.path.exists(image_path):
                 image = Image.open(image_path)
             else:
-                image = None    
+                image = None
+                print(f"Image not found: {image_path}")   
         else:
             image = None
-        
+        message = item['messages']
+        user_message = message[0]['content']
+        user_message = user_message.replace("<image> Text:", "<image>\nText:")
+        user_message = user_message.replace("<image>", "").strip()
+        assistant_message = message[1]['content']
+        return {
+            "user_message": user_message,
+            "assistant_message": assistant_message,
+            "image": image
+        }
+            
+if __name__ == '__main__':
+    
+    dataset = GroundedMNER("data/sft/train_sft.jsonl", "data/sft/images")
+    print(dataset[1])
 
-        
 
         
     
