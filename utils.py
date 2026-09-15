@@ -1,5 +1,5 @@
 class Arguments:
-    def __init__(self, args_path: str):
+    def __init__(self, args_path: str=""):
         self.args_dict = self._load_json_config(args_path)
         for key, value in self.args_dict.items():
             setattr(self, key, value)
