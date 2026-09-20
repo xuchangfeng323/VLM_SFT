@@ -2,7 +2,14 @@ import math
 import os
 import json
 import re
+from dataclasses import dataclass
 ENTITY_SPLIT_RE = re.compile(r"[;；\n]+")
+@dataclass(frozen=True)
+class EntityTriple:
+    text: str
+    etype: str
+    regions: Optional[List[Box]]
+    region_valid: bool = True
 class Arguments:
     def __init__(self, args_path: str=""):
         self.args_dict = self._load_json_config(args_path)
@@ -33,7 +40,20 @@ def resize_image(height, width, min_pixels, max_pixels,factor=28):
         h_bar=math.floor(h_bar*beta*factor)
         w_bar=math.floor(w_bar*beta*factor)
     return h_bar, w_bar
-        
-           
-    
-
+def _clamp_int(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(v, hi))
+def scale_box(box,scale_w,scale_h,new_w,new_h): 
+        x1, y1, x2, y2 = box
+        x1n = int(round(x1 * scale_w))
+        y1n = int(round(y1 * scale_h))
+        x2n = int(round(x2 * scale_w))
+        y2n = int(round(y2 * scale_h))
+        x1n = _clamp_int(x1n, 0, new_w)
+        y1n = _clamp_int(y1n, 0, new_h)
+        x2n = _clamp_int(x2n, 0, new_w)
+        y2n = _clamp_int(y2n, 0, new_h)
+        if x1n > x2n:
+            x1n, x2n = x2n, x1n
+        if y1n > y2n:
+            y1n, y2n = y2n, y1n
+        return x1n, y1n, x2n, y2n

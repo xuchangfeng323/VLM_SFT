@@ -4,3 +4,4 @@ class Trainer:
         self.model = QwenVlModel(args)
         self.dataset = GroundedMNER(args.train_data_path, args.image_root)
         
+        

@@ -2,6 +2,8 @@ from torch.utils.data import Dataset
 from PIL import Image
 import json
 import os
+from utils import EntityTriple, resize_image
+
 class GroundedMNER(Dataset):
     def __init__(self, data_path,image_root):
         self.items: List[Dict[str, Any]] = []
@@ -47,6 +49,10 @@ class GroundedMNER(Dataset):
             image = x["image"]
             height, width = image.size
             orig_sizes.append((height, width))
+            h_bar, w_bar = resize_image(height, width, self.args.min_pixels, self.args.max_pixels)
+            
+
+
             
 
         
