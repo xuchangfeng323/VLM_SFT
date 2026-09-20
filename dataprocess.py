@@ -5,10 +5,16 @@ import os
 from utils import EntityTriple, resize_image,scale_box
 
 class GroundedMNER(Dataset):
-    def __init__(self, data_path,image_root):
+    def __init__(self, data_path,image_root,processor:ProcessorBase):
         self.items: List[Dict[str, Any]] = []
         self.image_root = image_root
         self.data_path = data_path
+        self.processor=processor
+        self.tokenizer=processor.tokenizer
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        self.tokenizer.padding_side = "right"
         with open(self.data_path, 'r') as f:
             for line in f:
                 line = line.strip()
@@ -45,6 +51,8 @@ class GroundedMNER(Dataset):
         orig_assistant_texts: List[str] = []
         orig_sizes: List[Tuple[int, int]] = []
         user_messages: List[str] = []
+        prompt_texts: List[str] = []
+        full_texts: List[str] = []
         for x in batch:
             image = x["image"]
             images.append(image)
@@ -68,7 +76,59 @@ class GroundedMNER(Dataset):
             else:
                 scaled_assistant_texts.append("")
             user_messages.append(user_message)
-            
+        for scaled_assistant_text,user_message,img in zip(scaled_assistant_texts,user_messages,images):
+            message=self.build_messages(user_message)
+            full_message=self.build_messages(user_message,scaled_assistant_text)
+            message_prompt = self.processor.apply_chat_template(
+                message, tokenize=False, add_generation_prompt=True
+            )
+            full_message_prompt = self.processor.apply_chat_template(
+                full_message, tokenize=False, add_generation_prompt=False
+            )
+            prompt_texts.append(message_prompt)
+            full_texts.append(full_message_prompt)
+        old_side = self.tokenizer.padding_side
+        self.tokenizer.padding_side = "right"
+        full_inputs = self.processor(
+            text=full_texts,
+            images=images,
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
+
+        self.tokenizer.padding_side = "left"
+        prompt_inputs = self.processor(
+            text=prompt_texts,
+            images=images,
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
+        self.tokenizer.padding_side = old_side
+
+        input_ids = full_inputs["input_ids"]
+        attention_mask = full_inputs["attention_mask"]
+        prompt_lens = prompt_inputs["attention_mask"].sum(dim=1)
+
+        labels = input_ids.clone()
+        labels[:] = -100
+        for i in range(input_ids.size(0)):
+            p_len = int(prompt_lens[i].item())
+            labels[i, p_len:] = input_ids[i, p_len:] 
+            labels[i, attention_mask[i] == 0] = -100
+        full_inputs["labels"] = labels
+        full_inputs["prompt_input_ids"] = prompt_inputs["input_ids"]
+        full_inputs["prompt_attention_mask"] = prompt_inputs["attention_mask"]
+        full_inputs["gold_texts"] = scaled_assistant_texts     
+        full_inputs["gold_texts_orig"] = orig_assistant_texts  
+        full_inputs["orig_sizes"] = orig_sizes
+        full_inputs["full_texts"]=full_texts
+        return full_inputs
+
+                
     def build_messages(self, user_text: str, assistant_text: Optional[str] = None) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
         if self.system_prompt:
