@@ -5,7 +5,7 @@ import os
 from utils import EntityTriple, resize_image,scale_box
 
 class GroundedMNER(Dataset):
-    def __init__(self, data_path,image_root,processor:ProcessorBase):
+    def __init__(self, data_path,image_root,processor):
         self.items: List[Dict[str, Any]] = []
         self.image_root = image_root
         self.data_path = data_path
