@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 ENTITY_SPLIT_RE = re.compile(r"[;；\n]+")
+ANSWER_TAG_RE = re.compile(r"<answer>(.*?)</answer>", re.S | re.I)
 @dataclass(frozen=True)
 class EntityTriple:
     text: str
@@ -42,6 +43,29 @@ def resize_image(height, width, min_pixels, max_pixels,factor=28):
     return h_bar, w_bar
 def _clamp_int(v: int, lo: int, hi: int) -> int:
     return max(lo, min(v, hi))
+def normalize_separators(s: str) -> str:
+    if s is None:
+        return ""
+    for b in BAR_VARIANTS:
+        s = s.replace(b, FULLWIDTH_BAR_CANON)
+    return s
+def parse_triples(s: str, *, strict: bool, where: str) -> List[EntityTriple]:
+    if s is None:
+        return []
+    s = normalize_separators(s).strip()
+    if not s or s.lower() == "none":
+        return []
+def extract_answer_text(s: Optional[str]) -> str:
+    if not s:
+        return ""
+    s = s.strip()
+    match_answer = ANSWER_TAG_RE.search(s)
+    if match_answer:
+        return (match_answer.group(1) or "").strip()
+    match_answer2 = re.search(r"</think>\s*(.*)$", s, flags=re.S | re.I)
+    if match_answer2:
+        return (match_answer2.group(1) or "").strip()
+    return s
 def scale_box(box,scale_w,scale_h,new_w,new_h): 
         x1, y1, x2, y2 = box
         x1n = int(round(x1 * scale_w))
