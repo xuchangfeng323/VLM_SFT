@@ -1,7 +1,6 @@
 from torch.utils.data import Dataset
 from PIL import Image
 import json
-import math
 import os
 from utils import Arguments
 from utils import EntityTriple, resize_image, scale_box
@@ -9,23 +8,6 @@ from utils import parse_regions, format_regions, split_entity_triples, is_none_f
 from transformers import AutoProcessor
 from torch.utils.data import DataLoader
 from typing import List, Dict, Any, Tuple, Optional
-def fit_image_for_resize(image: Image.Image, factor: int = 28) -> Image.Image:
-    """把不满足 resize_image 前置约束的图片先处理一下：
-    短边小于 factor 时等比放大，长宽比超过 200 时压长边，避免整条样本被丢掉。"""
-    width, height = image.size
-    k = 1
-    if min(width, height) < factor:
-        k = math.ceil(factor / min(width, height))
-    new_w, new_h = width * k, height * k
-    if max(new_w, new_h) / min(new_w, new_h) > 200:
-        if new_w > new_h:
-            new_w = 200 * new_h
-        else:
-            new_h = 200 * new_w
-    new_w, new_h = max(1, int(new_w)), max(1, int(new_h))
-    if (new_w, new_h) == (width, height):
-        return image
-    return image.resize((new_w, new_h), Image.BICUBIC)
 class GroundedMNER(Dataset):
     def __init__(self, args:Arguments,data_path:str,image_root:str,processor:AutoProcessor):
         self.items: List[Dict[str, Any]] = []
@@ -58,8 +40,7 @@ class GroundedMNER(Dataset):
                 f"[{os.path.basename(self.data_path)}] 丢弃 {dropped}/{total} 个样本: {self.dropped}"
             )
     def _is_valid(self, item: Dict[str, Any]) -> bool:
-        """不合格的样本直接丢弃：图找不到/读不了、标注解析不了。
-        图片尺寸或长宽比不满足 resize_image 约束时不丢弃，改为先缩放成合格尺寸。"""
+        """不合格的样本直接丢弃：图找不到/读不了、尺寸或长宽比不满足 resize_image、标注解析不了。"""
         if self.image_root:
             image_path = os.path.join(self.image_root, item['images'][0])
             if not os.path.exists(image_path):
@@ -68,7 +49,6 @@ class GroundedMNER(Dataset):
             try:
                 with Image.open(image_path) as im:
                     width, height = im.size
-                    width, height = fit_image_for_resize(im).size
             except Exception:
                 self.dropped["bad_image_size"] += 1
                 return False
@@ -139,10 +119,8 @@ class GroundedMNER(Dataset):
                 continue
             orig_width, orig_height = image.size
             orig_sizes.append((orig_height, orig_width))
-            image = fit_image_for_resize(image)
             images.append(image)
-            fed_width, fed_height = image.size
-            h_new, w_new = resize_image(fed_height, fed_width, self.args.min_pixels, self.args.max_pixels)
+            h_new, w_new = resize_image(orig_height, orig_width, self.args.min_pixels, self.args.max_pixels)
             user_message=x['user_message']
             # 框是原始图像坐标系，模型看到的是 resize_image 之后的尺寸，所以用原始尺寸换算
             scale_w = w_new / float(orig_width)
