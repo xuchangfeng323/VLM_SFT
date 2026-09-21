@@ -1,4 +1,5 @@
 from transformers import Qwen2_5_VLForConditionalGeneration
+from transformers import AutoProcessor
 from peft import LoraConfig, get_peft_model
 from utils import Arguments
 class QwenVlModel:
@@ -21,6 +22,9 @@ class QwenVlModel:
                 self.model.enable_input_require_grads()
     def get_model(self):
         return self.model
+
+        
+        
 
 
         

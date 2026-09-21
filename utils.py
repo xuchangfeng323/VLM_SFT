@@ -2,7 +2,9 @@ import math
 import os
 import json
 import re
+from typing import List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass
+Box = Tuple[int, int, int, int]
 ENTITY_SPLIT_RE = re.compile(r"[;；\n]+")
 ANSWER_TAG_RE = re.compile(r"<answer>(.*?)</answer>", re.S | re.I)
 @dataclass(frozen=True)
@@ -26,20 +28,20 @@ class Arguments:
 def resize_image(height, width, min_pixels, max_pixels,factor=28):
     if height < factor or width < factor:
         raise ValueError(f"height:{height} or width:{width} must be larger than factor:{factor}")
-    if max(height, width) / min(height, width) > 200:
+    elif max(height, width) / min(height, width) > 200:
         raise ValueError(
             f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
         )
     h_bar = round(height / factor) * factor
     w_bar = round(width / factor) * factor
-    if h_bar * w_bar < min_pixels:
-        beta=math.sqrt(min_pixels/h_bar*w_bar)
-        h_bar=math.ceil(h_bar*beta/factor)*factor
-        w_bar=math.ceil(w_bar*beta/factor)*factor
     if h_bar * w_bar > max_pixels:
-        beta=math.sqrt(h_bar*w_bar/max_pixels)
-        h_bar=math.floor(h_bar*beta*factor)
-        w_bar=math.floor(w_bar*beta*factor)
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = math.floor(height / beta / factor) * factor
+        w_bar = math.floor(width / beta / factor) * factor
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = math.ceil(height * beta / factor) * factor
+        w_bar = math.ceil(width * beta / factor) * factor
     return h_bar, w_bar
 def _clamp_int(v: int, lo: int, hi: int) -> int:
     return max(lo, min(v, hi))
@@ -81,3 +83,57 @@ def scale_box(box,scale_w,scale_h,new_w,new_h):
         if y1n > y2n:
             y1n, y2n = y2n, y1n
         return x1n, y1n, x2n, y2n
+
+_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+_INNER_BOX_SPLIT_RE = re.compile(r"\]\s*,\s*\[")
+NONE_FIELD = "None"
+def is_none_field(s: Optional[str]) -> bool:
+    return s is None or s.strip().lower() in ("", "none")
+def parse_regions(field: str) -> Optional[List[Box]]:
+    """解析框字段，支持 'None'、'[x1,y1,x2,y2]' 与 '[[..],[..]]'。"""
+    if is_none_field(field):
+        return None
+    s = field.strip().strip("[]")
+    regions: List[Box] = []
+    for chunk in _INNER_BOX_SPLIT_RE.split(s):
+        nums = _NUM_RE.findall(chunk)
+        if len(nums) != 4:
+            raise ValueError(f"bad box field: {field!r}")
+        regions.append(tuple(int(round(float(v))) for v in nums))
+    if not regions:
+        raise ValueError(f"bad box field: {field!r}")
+    return regions
+def format_regions(regions: Optional[List[Box]]) -> str:
+    """输出与标注一致的格式：不可见为 None，可见为 [x1,y1,x2,y2] 或 [[..],[..]]。"""
+    if not regions:
+        return NONE_FIELD
+    boxes = [",".join(str(int(v)) for v in box) for box in regions]
+    if len(boxes) == 1:
+        return f"[{boxes[0]}]"
+    return "[" + ",".join(f"[{b}]" for b in boxes) + "]"
+def _looks_like_triple(frag: str) -> bool:
+    parts = frag.rsplit("|", 2)
+    if len(parts) != 3:
+        return False
+    try:
+        parse_regions(parts[2])
+    except ValueError:
+        return False
+    return True
+def split_entity_triples(s: Optional[str]) -> List[str]:
+    """按 ';' 切分实体，并把实体名里 '&amp ;' 之类被误切开的片段合并回去。"""
+    if not s:
+        return []
+    frags = re.split(r"[;；]", s)
+    out: List[str] = []
+    buf = ""
+    for frag in frags:
+        cand = frag if not buf else buf + ";" + frag
+        if _looks_like_triple(cand):
+            out.append(cand.strip())
+            buf = ""
+        else:
+            buf = cand
+    if buf.strip():
+        out.append(buf.strip())
+    return out
