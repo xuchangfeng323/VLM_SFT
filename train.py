@@ -25,8 +25,13 @@ class Trainer:
         self.total_steps = steps_per_epoch * args.epochs
         self.warmup_steps = int(total_steps * args.warmup_ratio)
         self.seed_everything()
-        g = torch.Generator()
-        g.manual_seed(args.seed) 
+        self.generator = torch.Generator()
+        self.generator.manual_seed(self.args.seed) 
+    def seed_worker(self, worker_id: int):
+        worker_seed = self.args.seed + worker_id
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
     def set_optimizer(self):
         if self.model is None:
             raise ValueError("Model is None")
@@ -61,7 +66,31 @@ class Trainer:
 
         # ❌ 不再使用 deterministic algorithms
         torch.use_deterministic_algorithms(False) 
-    
+    def train(self):
+        self.set_optimizer()
+        self.train_dataloader=self.train_dataset.get_dataloader(
+            self.args.batch_size, 
+            shuffle=True, 
+            num_workers=self.args.num_workers, 
+            worker_init_fn=self.seed_worker, 
+            generator=self.generator)
+        self.val_dataloader=self.val_dataset.get_dataloader(
+            self.args.batch_size, 
+            shuffle=False, 
+            num_workers=self.args.num_workers, 
+            worker_init_fn=self.seed_worker, 
+            generator=self.generator)
+        self.test_dataloader=self.test_dataset.get_dataloader(
+            self.args.batch_size, 
+            shuffle=False, 
+            num_workers=self.args.num_workers, 
+            worker_init_fn=self.seed_worker, 
+            generator=self.generator)
+        self.model,self.optimizer,self.scheduler,self.train_dataloader,self.val_dataloader,self.test_dataloader
+        =self.accelerator.prepare(self.model,self.optimizer,self.scheduler,self.train_dataloader,self.val_dataloader,self.test_dataloader)
+        self.model.train()
+        for epoch in range(self.args.epochs):
+            
     
 
         

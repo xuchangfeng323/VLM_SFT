@@ -226,8 +226,8 @@ class GroundedMNER(Dataset):
         if assistant_text is not None:
             messages.append({"role": "assistant", "content": assistant_text})
         return messages
-    def get_dataloader(self,batch_size, shuffle=True, num_workers=0):
-        return DataLoader(self, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,collate_fn=self.collate_fn)           
+    def get_dataloader(self,batch_size, shuffle=True, num_workers=0,worker_init_fn=None,generator=None):
+        return DataLoader(self, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,collate_fn=self.collate_fn,worker_init_fn=worker_init_fn,generator=generator,persistent_workers=(num_workers > 0))           
 
                 
                 
