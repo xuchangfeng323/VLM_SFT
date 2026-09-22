@@ -8,6 +8,7 @@
     "model_dir": "/home/model/Qwen2.5-VL-3B-Instruct",
     "min_pixels":200704,
     "max_pixels":802816,
+    "grad_accum_steps": 4,
     "data_path": "./data/sft/",
     "max_length":2048 ,
     "max_new_tokens": 300,

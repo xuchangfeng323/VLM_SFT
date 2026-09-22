@@ -4,7 +4,7 @@ import random
 import numpy as np
 import torch
 from typing import Optional
-
+from accelerate import Accelerator
 from transformers import get_cosine_schedule_with_warmup
 from utils import Arguments
 from model import QwenVlModel
@@ -13,10 +13,17 @@ from dataprocess import GroundedMNER
 class Trainer:
     def __init__(self, args: Arguments):
         self.args = args
+        self.accelerator = Accelerator(
+            gradient_accumulation_steps=args.grad_accum_steps,
+            mixed_precision="bf16",
+        )    
         self.model = QwenVlModel(args, dtype=torch.bfloat16)
         self.train_dataset = GroundedMNER(args.data_path+"train_sft.jsonl", args.image_root)
         self.val_dataset = GroundedMNER(args.data_path+"dev_sft.jsonl", args.image_root)
         self.test_dataset = GroundedMNER(args.data_path+"test_sft.jsonl", args.image_root)
+        self.steps_per_epoch = math.ceil(len(self.train_dataset) / args.grad_accum_steps)
+        self.total_steps = steps_per_epoch * args.epochs
+        self.warmup_steps = int(total_steps * args.warmup_ratio)
         self.seed_everything()
         g = torch.Generator()
         g.manual_seed(args.seed) 
@@ -34,7 +41,7 @@ class Trainer:
         },
     ]
         self.optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.lr)
-        self.scheduler = get_cosine_schedule_with_warmup(self.optimizer, warmup_steps, total_steps)
+        self.scheduler = get_cosine_schedule_with_warmup(self.optimizer, self.warmup_steps, self.total_steps)
     def seed_everything(self, seed: Optional[int] = 42, *, verbose: bool = True):
         random.seed(seed) 
         np.random.seed(seed)
