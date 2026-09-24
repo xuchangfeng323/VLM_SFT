@@ -1,6 +1,8 @@
 
+from cProfile import label
 import random
-
+from tqdm import tqdm
+import accelerate
 import numpy as np
 import torch
 from typing import Optional
@@ -8,7 +10,7 @@ from accelerate import Accelerator
 from transformers import get_cosine_schedule_with_warmup
 from utils import Arguments
 from model import QwenVlModel
-from dataprocess import GroundedMNER
+from dataprocess import GroundedMNER, batch, train_dataloader
 
 class Trainer:
     def __init__(self, args: Arguments):
@@ -86,11 +88,28 @@ class Trainer:
             num_workers=self.args.num_workers, 
             worker_init_fn=self.seed_worker, 
             generator=self.generator)
-        self.model,self.optimizer,self.scheduler,self.train_dataloader,self.val_dataloader,self.test_dataloader
-        =self.accelerator.prepare(self.model,self.optimizer,self.scheduler,self.train_dataloader,self.val_dataloader,self.test_dataloader)
+        self.model,self.optimizer,self.scheduler,self.train_dataloader,self.val_dataloader,self.test_dataloader=self.accelerator.prepare(
+            self.model,
+            self.optimizer,
+            self.scheduler,
+            self.train_dataloader,
+            self.val_dataloader,
+            self.test_dataloader)
         self.model.train()
         for epoch in range(self.args.epochs):
-            
+            pbar = tqdm(train_loader, desc=f"epoch {epoch+1}/{args.epochs}")
+            for step,batch in enumerate(train_dataloader):
+                with accelerator.accumulate(model):
+                    optimizer.zero_grad()
+                    loss=model(
+                        batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                        labels=batch["labels"],
+                        
+                                )
+
+
+                
     
 
         
