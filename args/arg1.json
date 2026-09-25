@@ -1,6 +1,7 @@
 {
     "num_epochs": 5,
     "batch_size": 2,
+    "image_root": "./data/images/",
     "lr":2e-05,
     "weight_decay": 0.01,
     "device": "cuda:0",

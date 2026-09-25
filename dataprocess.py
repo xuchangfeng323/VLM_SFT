@@ -265,7 +265,7 @@ if __name__ == '__main__':
         sequences = outputs.sequences if hasattr(outputs, "sequences") else outputs
         # 只解码新生成的部分：prompt 是左 padding，前 prompt.shape[1] 列全是输入
         generated_ids = sequences[:, prompt.shape[1]:]
-        outputs_texts=processor.batch_decode(generated_ids, skip_special_tokens=True,do_sample=False)
+        outputs_texts=processor.batch_decode(generated_ids, skip_special_tokens=True)
         print("model :", outputs_texts)
         print(batch["full_texts"])
         print(batch["orig_sizes"])

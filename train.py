@@ -2,15 +2,17 @@
 from cProfile import label
 import random
 from tqdm import tqdm
-import accelerate
+
+from transformers import AutoProcessor
 import numpy as np
 import torch
-from typing import Optional
+from typing import Optional, Dict, Any
+import math
 from accelerate import Accelerator
 from transformers import get_cosine_schedule_with_warmup
 from utils import Arguments
 from model import QwenVlModel
-from dataprocess import GroundedMNER, batch, train_dataloader
+from dataprocess import GroundedMNER
 
 class Trainer:
     def __init__(self, args: Arguments):
@@ -19,14 +21,16 @@ class Trainer:
             gradient_accumulation_steps=args.grad_accum_steps,
             mixed_precision="bf16",
         )    
-        self.model = QwenVlModel(args, dtype=torch.bfloat16)
-        self.train_dataset = GroundedMNER(args.data_path+"train_sft.jsonl", args.image_root)
-        self.val_dataset = GroundedMNER(args.data_path+"dev_sft.jsonl", args.image_root)
-        self.test_dataset = GroundedMNER(args.data_path+"test_sft.jsonl", args.image_root)
+        self.model_config = QwenVlModel(args)
+        self.model = self.model_config.get_model()
+        self.processor = AutoProcessor.from_pretrained(args.model_dir)
+        self.train_dataset = GroundedMNER(args,args.data_path+"train_sft.jsonl", args.image_root)
+        self.val_dataset = GroundedMNER(args,args.data_path+"dev_sft.jsonl", args.image_root)
+        self.test_dataset = GroundedMNER(args,args.data_path+"test_sft.jsonl", args.image_root)
         self.steps_per_epoch = math.ceil(len(self.train_dataset) / args.grad_accum_steps)
-        self.total_steps = steps_per_epoch * args.epochs
-        self.warmup_steps = int(total_steps * args.warmup_ratio)
-        self.seed_everything()
+        self.total_steps = self.steps_per_epoch * args.epochs
+        self.warmup_steps = int(self.total_steps * args.warmup_ratio)
+        self.seed_everything(self.args.seed)
         self.generator = torch.Generator()
         self.generator.manual_seed(self.args.seed) 
     def seed_worker(self, worker_id: int):
@@ -39,11 +43,11 @@ class Trainer:
             raise ValueError("Model is None")
         optimizer_grouped_parameters = [
         {
-            "params": [p for n, p in model.named_parameters() if n in decay_params and p.requires_grad],
+            "params": [p for n, p in self.model.named_parameters() if n in decay_params and p.requires_grad],
             "weight_decay": args.weight_decay,
         },
         {
-            "params": [p for n, p in model.named_parameters() if n not in decay_params and p.requires_grad],
+            "params": [p for n, p in self.model.named_parameters() if n not in decay_params and p.requires_grad],
             "weight_decay": 0.0,
         },
     ]
@@ -68,6 +72,12 @@ class Trainer:
 
         # ❌ 不再使用 deterministic algorithms
         torch.use_deterministic_algorithms(False) 
+    def pick_vision_inputs(batch: Dict[str, Any]) -> Dict[str, Any]:
+        vision_inputs = {}
+        for k in ["pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"]:
+            if k in batch:
+                vision_inputs[k] = batch[k]
+        return vision_inputs
     def train(self):
         self.set_optimizer()
         self.train_dataloader=self.train_dataset.get_dataloader(
@@ -97,16 +107,22 @@ class Trainer:
             self.test_dataloader)
         self.model.train()
         for epoch in range(self.args.epochs):
-            pbar = tqdm(train_loader, desc=f"epoch {epoch+1}/{args.epochs}")
-            for step,batch in enumerate(train_dataloader):
-                with accelerator.accumulate(model):
-                    optimizer.zero_grad()
-                    loss=model(
+            pbar = tqdm(self.train_dataloader, desc=f"epoch {epoch+1}/{args.epochs}")
+            for step,batch in enumerate(pbar):
+                with self.accelerator.accumulate(self.model):
+                    self.optimizer.zero_grad()
+                    loss=self.model(
                         batch["input_ids"],
                         attention_mask=batch["attention_mask"],
                         labels=batch["labels"],
-                        
-                                )
+                        return_dict=False,
+                        use_cache=False,
+                        **self.pick_vision_inputs(batch)
+                                )[0]
+                    accelerator.backward(loss)
+                    accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    scheduler.step()
 
 
                 

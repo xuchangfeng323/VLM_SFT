@@ -4,7 +4,7 @@ from peft import LoraConfig, get_peft_model
 from utils import Arguments
 class QwenVlModel:
     def __init__(self,args:Arguments):
-        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.model_path)
+        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.model_dir)
         for param in self.model.parameters():
             param.requires_grad = False
         self.lora_config = LoraConfig(
