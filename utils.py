@@ -13,10 +13,60 @@ class EntityTriple:
     etype: str
     regions: Optional[List[Box]]
     region_valid: bool = True
+
+# 配置文件里容易写错的字段名 -> 代码里统一使用的名字（两边都会保留成属性）
+ARG_ALIASES = {
+    "lora_r": "r",
+    "lora_target_modules": "target_modules",
+    "warmup_radio": "warmup_ratio",
+    "num_epochs": "epochs",
+    "gradient_accumulation_steps": "grad_accum_steps",
+}
+# 配置文件里可以不写、缺省时用这些值兜底
+ARG_DEFAULTS = {
+    "seed": 42,
+    "epochs": 3,
+    "batch_size": 1,
+    "grad_accum_steps": 1,
+    "num_workers": 2,
+    "lr": 2e-5,
+    "eps": 1e-8,
+    "weight_decay": 0.0,
+    "warmup_ratio": 0.0,
+    "max_length": 1024,
+    "max_new_tokens": 256,
+    "r": 16,
+    "lora_alpha": 16,
+    "lora_dropout": 0.05,
+    "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+    "monitor": "val_f1",
+    "patience": 3,
+    "save_dir": "checkpoint/",
+    "data_path": "./data/sft/",
+    "image_root": "",
+    "iou_threshold": 0.5,
+    # swanlab 实验记录（详细说明见 tracker.py）
+    "use_swanlab": False,
+    "swanlab_project": "VLM_SFT-GMNER",
+    "swanlab_workspace": None,
+    "swanlab_experiment_name": None,
+    "swanlab_description": None,
+    "swanlab_mode": None,  # None=云端 / "offline" / "local" / "disabled"
+    "swanlab_logdir": None,
+    "swanlab_log_interval": 10,
+}
+
+
 class Arguments:
     def __init__(self, args_path: str=""):
-        self.args_dict = self._load_json_config(args_path)
-        for key, value in self.args_dict.items():
+        config = self._load_json_config(args_path)
+        for alias, name in ARG_ALIASES.items():
+            if alias in config and name not in config:
+                config[name] = config[alias]
+        for key, value in ARG_DEFAULTS.items():
+            config.setdefault(key, value)
+        self.args_dict = config
+        for key, value in config.items():
             setattr(self, key, value)
 
     def _load_json_config(self, config_path: str):

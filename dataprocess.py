@@ -100,6 +100,9 @@ class GroundedMNER(Dataset):
         user_message = user_message.replace("<image>", "").strip()
         assistant_message = message[1]['content']
         return {
+            "index": index,
+            "id": item.get('id'),
+            "image_path": item['images'][0],
             "user_message": user_message,
             "assistant_message": assistant_message,
             "image": image
@@ -112,11 +115,17 @@ class GroundedMNER(Dataset):
         user_messages: List[str] = []
         prompt_texts: List[str] = []
         full_texts: List[str] = []
+        ids: List[Any] = []
+        image_paths: List[str] = []
+        indexes: List[int] = []
         for x in batch:
             image = x["image"]
             if image is None:
                 self.num_missing_images += 1
                 continue
+            indexes.append(x.get("index"))
+            ids.append(x.get("id"))
+            image_paths.append(x.get("image_path"))
             orig_width, orig_height = image.size
             orig_sizes.append((orig_height, orig_width))
             images.append(image)
@@ -202,9 +211,12 @@ class GroundedMNER(Dataset):
         full_inputs["labels"] = labels
         full_inputs["prompt_input_ids"] = prompt_inputs["input_ids"]
         full_inputs["prompt_attention_mask"] = prompt_inputs["attention_mask"]
-        full_inputs["gold_texts"] = scaled_assistant_texts     
-        full_inputs["gold_texts_orig"] = orig_assistant_texts  
+        full_inputs["gold_texts"] = scaled_assistant_texts
+        full_inputs["gold_texts_orig"] = orig_assistant_texts
         full_inputs["orig_sizes"] = orig_sizes
+        full_inputs["indexes"] = indexes
+        full_inputs["ids"] = ids
+        full_inputs["image_paths"] = image_paths
         full_inputs["full_texts"]=full_texts
         return full_inputs
 
