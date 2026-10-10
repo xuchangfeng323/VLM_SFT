@@ -124,7 +124,7 @@ def normalize_separators(s: str) -> str:
         return ""
     for bar in BAR_VARIANTS:
         s = s.replace(bar, FULLWIDTH_BAR_CANON)
-
+    
     return s
 def parse_triple_segment(
     seg: str,
@@ -149,5 +149,27 @@ def parse_triple_segment(
             )
 
         return None
+    entity_name="|".join(parts[:-2])
+    etype=parts[-2]
+    bbox_str=parts[-1]
+    if not entity_name or not etype:
+        if strict:
+            raise ValueError(
+                f"[{where}] empty mention/type: {seg!r}"
+            )
+
+        return None
+    regions, region_valid = parse_bbox_regions(
+        bbox_str=bbox_str,
+        strict=strict,
+        where=where,
+    )
+    return EntityTriple(
+        text=entity_name,
+        region_valid=region_valid,
+        etype=etype,
+        regions=regions,
+    )
+
 
         
