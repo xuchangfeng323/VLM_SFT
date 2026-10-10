@@ -12,7 +12,11 @@ BAR_VARIANTS = [
     "￨",
     "∣",
 ]
-
+ENTITY_SPLIT_RE = re.compile(r"[;；\n]+")
+ANSWER_TAG_RE = re.compile(
+    r"<answer>(.*?)</answer>",
+    re.S | re.I,
+)
 @dataclass(frozen=True)
 class EntityTriple:
     text: str
@@ -170,6 +174,34 @@ def parse_triple_segment(
         etype=etype,
         regions=regions,
     )
+def parse_triples(
+    s: str,
+    *,
+    strict: bool,
+    where: str,
+) -> list[EntityTriple]:
+    if s is None:
+            return []
+    s = normalize_separators(s).strip()
+    if not s or s.lower() == "none":
+        return []
+    segments=[
+        seg.strip()
+        for seg in ENTITY_SPLIT_RE.split(s)
+        if seg.strip()
+    ]
+    triples: list[EntityTriple] = []
+    for seg in segments:
+        if seg.lower() == "none":
+            continue
+        triple=parse_triple_segment(
+            seg=seg,
+            strict=strict,
+            where=where,
+        )
+        if triple is not None:
+            triples.append(triple)
+    return triples
 
-
+    
         
