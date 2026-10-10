@@ -3,7 +3,15 @@ from typing import List, Optional, Tuple
 import json
 import re
 Box = Tuple[float, float, float, float]
+FULLWIDTH_BAR_CANON = "|"
 
+BAR_VARIANTS = [
+    "｜",
+    "│",
+    "丨",
+    "￨",
+    "∣",
+]
 
 @dataclass(frozen=True)
 class EntityTriple:
@@ -111,5 +119,35 @@ def parse_bbox_regions(
 
         return None, False
     return boxes, True
+def normalize_separators(s: str) -> str:
+    if s is None:
+        return ""
+    for bar in BAR_VARIANTS:
+        s = s.replace(bar, FULLWIDTH_BAR_CANON)
+
+    return s
+def parse_triple_segment(
+    seg: str,
+    *,
+    strict: bool,
+    where: str,
+) -> Optional[EntityTriple]:
+    seg=seg.strip()
+    if not seg or seg.lower() == "none":
+        return None
+    seg=normalize_separators(seg)
+    parts = [
+        part.strip()
+        for part in seg.split("|")
+        if part.strip()
+    ]
+    if len(parts) < 3:
+        if strict:
+            raise ValueError(
+                f"[{where}] cannot parse segment "
+                f"(too few parts): {seg!r}"
+            )
+
+        return None
 
         
