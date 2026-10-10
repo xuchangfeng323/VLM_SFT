@@ -202,6 +202,26 @@ def parse_triples(
         if triple is not None:
             triples.append(triple)
     return triples
+def extract_answer_text(
+    s: Optional[str],
+) -> str:
+    if not s:
+        return ""
+    s=s.strip()
+    match=ANSWER_TAG_RE.search(s)
+    if match:
+        return (match.group(1) or "").strip()
+    match_after_think = re.search(
+        r"</think>\s*(.*)$",
+        s,
+        flags=re.S | re.I,
+    )
+    if match_after_think:
+        return (match_after_think.group(1) or "").strip()
+    return s
+    
+    
+
 
     
         
