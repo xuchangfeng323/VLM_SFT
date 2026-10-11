@@ -1,5 +1,6 @@
-from utils import Box
-from typing import Tuple
+from utils import Box, EntityTriple
+from typing import Tuple,Dict
+from functools import lru_cache
 def iou(box1: Box, box2: Box) -> float:
     x1, y1, x2, y2 = box1
     x1g, y1g, x2g, y2g = box2
@@ -13,3 +14,79 @@ def iou(box1: Box, box2: Box) -> float:
     if area_inter <= 0.0:
         return 0.0
     return area_inter / (area1 + area2 - area_inter)
+def max_iou(
+    pred_boxes: list[Box],
+    gold_boxes: list[Box],
+) -> float:
+    best=0
+    for pred_box in pred_boxes:
+        for gold_box in gold_boxes:
+            iou_score = iou(pred_box, gold_box)
+            if iou_score > best:
+                best = iou_score
+    return best
+def region_correct(
+    p: EntityTriple,
+    g: EntityTriple,
+    iou_threshold: float,
+) -> tuple[bool, float]:
+    if not p.region_valid:
+        return False, 0.0
+    if p.regions is None and g.regions is None:
+        return True, 1.0
+    if p.regions is None or g.regions is None:
+        return False, 0.0
+    max_iou_score = max_iou(p.regions, g.regions)
+    if max_iou_score >= iou_threshold:
+        return True, max_iou_score
+    return False, max_iou_score
+        
+def count_correct_mner(
+    preds: list[EntityTriple],
+    golds: list[EntityTriple],
+) -> int:
+    correct=0
+    used = [False] * len(golds)
+    for pred in preds:
+        for i, gold in enumerate(golds):
+            if used[i]:
+                continue
+            if (
+                pred.text == gold.text
+                and pred.etype == gold.etype
+            ):
+                used[i] = True
+                correct += 1
+                break
+    return correct
+def _best_bipartite_match_count_by_score(
+    num_preds: int,
+    num_golds: int,
+    edges: Dict[Tuple[int, int], float],
+) -> int:
+    @lru_cache(maxsize=None)
+    def dp(
+        i: int,
+        used_mask: int,
+    ) -> Tuple[int, float]:
+        if i>=num_preds:
+            return 0, 0.0
+        best=dp(i+1, used_mask)
+        for j in range(num_golds):
+            if ((used_mask>>j)&1) != 0:
+                continue
+            score = edges.get((i, j), None)
+            if score is None:
+                continue
+            candidate_count, candidate_score = dp(i+1, used_mask|(1<<j))
+            candidate_count += 1
+            candidate_score += score
+            if candidate_count > best[0]:
+                best = candidate_count, candidate_score
+                
+            elif (candidate_count == best[0] and candidate_score > best[1]):
+                best = candidate_count, candidate_score
+        return best
+    return int(dp(0, 0)[0])
+
+
