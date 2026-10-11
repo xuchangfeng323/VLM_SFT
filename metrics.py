@@ -1,5 +1,7 @@
 from utils import Box, EntityTriple
-from typing import Tuple,Dict
+from typing import Tuple,Dict,List
+import json
+import re
 from functools import lru_cache
 def iou(box1: Box, box2: Box) -> float:
     x1, y1, x2, y2 = box1
@@ -88,5 +90,30 @@ def _best_bipartite_match_count_by_score(
                 best = candidate_count, candidate_score
         return best
     return int(dp(0, 0)[0])
+
+def count_correct_gmner(
+    pred_triples: List[EntityTriple],
+    gold_triples: List[EntityTriple],
+    iou_threshold: float = 0.5,
+) -> int:
+    edges: Dict[Tuple[int, int], float] = {}
+    for i, pred in enumerate(pred_triples):
+        for j, gold in enumerate(gold_triples):
+            if pred.etype != gold.etype:
+                continue
+            if pred.text != gold.text:
+                continue
+            is_correct, score = region_correct(pred, gold, iou_threshold)
+            if not is_correct:
+                continue
+            if is_correct:
+                edges[(i, j)] = score
+    return _best_bipartite_match_count_by_score(
+        len(pred_triples),
+        len(gold_triples),
+        edges,
+    )
+        
+            
 
 
