@@ -219,7 +219,46 @@ def extract_answer_text(
     if match_after_think:
         return (match_after_think.group(1) or "").strip()
     return s
+def triples_to_canon_text(
+    triples: list[EntityTriple],
+) -> str:
+    if len(triples) == 0 or not triples:
+        return ""
+    triples_text_list=[]
+    for triple in triples:
+        bbox_str=""
+        if triple.regions is  None:
+            bbox_str="None"
+        else:
+            boxes=[]
+            for x1, y1, x2, y2 in triple.regions:
+                boxes.append(
+                    [
+                        int(round(x1)),
+                        int(round(y1)),
+                        int(round(x2)),
+                        int(round(y2)),
+                    ]
+                )
+            if len(boxes) == 1:
+                bbox_str = "[" + ",".join(
+                    map(str, boxes[0])
+                ) + "]"
+            else:
+                bbox_str = json.dumps(
+                    boxes,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+        triples_text_list.append(
+            f"{triple.text}|{triple.etype}|{bbox_str}"
+        )
+    return "; ".join(triples_text_list)
+
     
+    
+
+
     
 
 
