@@ -113,7 +113,14 @@ def count_correct_gmner(
         len(gold_triples),
         edges,
     )
-        
+def prf(correct: int,
+        predicted_len: int,
+        gold_len: int,)->Tuple[float, float, float]:
+    p=correct/(predicted_len+1e-10)
+    r=correct/(gold_len+1e-10)
+    f=2*p*r/(p+r) if p+r > 0 else 0
+    return p, r, f
+
             
 
 
