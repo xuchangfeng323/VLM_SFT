@@ -23,7 +23,7 @@ class EntityTriple:
     etype: str
     regions: Optional[List[Box]]
     region_valid: bool = True
-
+# 把一个float列表转换为Box列表
 def _boxes_from_numbers(
     nums: list[float],
     *,
@@ -31,7 +31,6 @@ def _boxes_from_numbers(
     where: str,
 ) -> list[Box]:
     if len(nums) % 4 != 0:
-        
         if strict:
             raise ValueError(f"Expected 4 numbers for {where}, got {len(nums)}")
         return []
@@ -40,6 +39,7 @@ def _boxes_from_numbers(
         x1, y1, x2, y2 = nums[i:i + 4]
         boxes.append((x1, y1, x2, y2))
     return boxes
+# 把bbox字符串解析为Box列表
 def parse_bbox_regions(
     bbox_str:str,
     *,
@@ -130,6 +130,7 @@ def normalize_separators(s: str) -> str:
         s = s.replace(bar, FULLWIDTH_BAR_CANON)
     
     return s
+# 把一个字符串解析为EntityTriple
 def parse_triple_segment(
     seg: str,
     *,
@@ -174,6 +175,7 @@ def parse_triple_segment(
         etype=etype,
         regions=regions,
     )
+# 把一个字符串解析为EntityTriple列表
 def parse_triples(
     s: str,
     *,
@@ -202,6 +204,7 @@ def parse_triples(
         if triple is not None:
             triples.append(triple)
     return triples
+#从response中提取answer文本
 def extract_answer_text(
     s: Optional[str],
 ) -> str:
@@ -219,6 +222,7 @@ def extract_answer_text(
     if match_after_think:
         return (match_after_think.group(1) or "").strip()
     return s
+# 把EntityTriple列表转换为字符串格式
 def triples_to_canon_text(
     triples: list[EntityTriple],
 ) -> str:

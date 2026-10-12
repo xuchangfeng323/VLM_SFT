@@ -3,6 +3,7 @@ from typing import Tuple,Dict,List
 import json
 import re
 from functools import lru_cache
+# 计算两个Box的IOU
 def iou(box1: Box, box2: Box) -> float:
     x1, y1, x2, y2 = box1
     x1g, y1g, x2g, y2g = box2
@@ -16,6 +17,7 @@ def iou(box1: Box, box2: Box) -> float:
     if area_inter <= 0.0:
         return 0.0
     return area_inter / (area1 + area2 - area_inter)
+#存在一个实体对应多个Box，计算最大IOU分数
 def max_iou(
     pred_boxes: list[Box],
     gold_boxes: list[Box],
@@ -27,6 +29,7 @@ def max_iou(
             if iou_score > best:
                 best = iou_score
     return best
+# 计算EntityTriple的IOU分数是否超过阈值，二者都是 None 时返回 True，1.0，否则返回 False，0.0
 def region_correct(
     p: EntityTriple,
     g: EntityTriple,
@@ -42,7 +45,7 @@ def region_correct(
     if max_iou_score >= iou_threshold:
         return True, max_iou_score
     return False, max_iou_score
-        
+# 统计正确匹配的EntityTriple数量
 def count_correct_mner(
     preds: list[EntityTriple],
     golds: list[EntityTriple],
@@ -61,6 +64,7 @@ def count_correct_mner(
                 correct += 1
                 break
     return correct
+# 计算最佳二分匹配数量，不使用最大匹配算法
 def _best_bipartite_match_count_by_score(
     num_preds: int,
     num_golds: int,
@@ -90,7 +94,7 @@ def _best_bipartite_match_count_by_score(
                 best = candidate_count, candidate_score
         return best
     return int(dp(0, 0)[0])
-
+#按照 MNER 来统计 TP，MNER 只需要实体类型和文本匹配
 def count_correct_gmner(
     pred_triples: List[EntityTriple],
     gold_triples: List[EntityTriple],
@@ -113,6 +117,7 @@ def count_correct_gmner(
         len(gold_triples),
         edges,
     )
+# 计算P, R, F1
 def prf(correct: int,
         predicted_len: int,
         gold_len: int,)->Tuple[float, float, float]:
