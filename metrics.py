@@ -126,6 +126,24 @@ def prf(correct: int,
     f=2*p*r/(p+r) if p+r > 0 else 0
     return p, r, f
 
-            
-
-
+def count_correct_eeg(
+    pred_triples: List[EntityTriple],
+    gold_triples: List[EntityTriple],
+    iou_threshold: float = 0.5,
+) -> int:
+    edges: Dict[Tuple[int, int], float] = {}
+    for i, pred in enumerate(pred_triples):
+        for j, gold in enumerate(gold_triples):
+            if pred.text != gold.text:
+                continue
+            is_correct, score = region_correct(pred, gold, iou_threshold)
+            if not is_correct:
+                continue
+            if is_correct:
+                edges[(i, j)] = score
+    correct = _best_bipartite_match_count_by_score(
+        len(pred_triples),
+        len(gold_triples),
+        edges,
+    )
+    return correct
