@@ -125,7 +125,7 @@ def rescale_assistant_text_bboxes(
         return None
     scale_w=new_w/orig_w
     scale_h=new_h/orig_h
-    triples=parse_triples(answer,strict=False,where="bbox_rescale")
+    triples=parse_triples(answer,strict=False,where="rescale_assistant_text_bboxes")
     if not triples:
         return None
     scaled_triples:List[EntityTriple]=[]
@@ -142,12 +142,12 @@ def rescale_assistant_text_bboxes(
                 (float(x1), float(y1), float(x2), float(y2))
             )
     
-    scaled_triples.append(
-            EntityTriple(
-                text=triple.text,
-                etype=triple.etype,
-                regions=scaled_regions,
-                region_valid=True,
-            ))
+        scaled_triples.append(
+                EntityTriple(
+                    text=triple.text,
+                    etype=triple.etype,
+                    regions=scaled_regions,
+                    region_valid=True,
+                ))
     scaled_answer=triples_to_canon_text(scaled_triples)
     return replace_answer_text(full,scaled_answer)
