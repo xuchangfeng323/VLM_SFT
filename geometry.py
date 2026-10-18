@@ -1,6 +1,7 @@
 import math
-from typing import Tuple, List
-from utils import Box
+from typing import Tuple, List, Optional
+import re
+from utils import Box, extract_answer_text,EntityTriple, triples_to_canon_text, parse_triples
 def smart_resize(
     height: int,
     width: int,
@@ -78,3 +79,75 @@ def inverse_scale_box_xyxy(
     if y1o > y2o:
         y1o, y2o = y2o, y1o
     return x1o, y1o, x2o, y2o
+def replace_answer_text(
+    full: Optional[str],
+    new_answer: str,
+) -> str:
+    new_answer = (new_answer or "").strip()
+    if not full:
+        return new_answer
+    text = full.strip()
+    answer_pattern = r"<answer>.*?</answer>"
+    if re.search(answer_pattern, text, flags=re.IGNORECASE | re.DOTALL):
+        return re.sub(
+            answer_pattern,
+            lambda _: f"<answer>{new_answer}</answer>",
+            text,
+            count=1,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    if re.search(r"</think>", text, flags=re.IGNORECASE):
+        return re.sub(
+            r"</think>.*$",
+            lambda match: f"{match.group(0)[:len('</think>')]}<answer>{new_answer}</answer>",
+            text,
+            count=1,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    return new_answer
+def rescale_assistant_text_bboxes(
+    assistant_text: Optional[str],
+    orig_w: int,
+    orig_h: int,
+    min_pixels: int,
+    max_pixels: int,
+    factor: int = 28,
+) -> Optional[str]:
+    if assistant_text is None:
+        return None
+    full=assistant_text.strip()
+    answer=extract_answer_text(full)
+    if not answer or answer.lower() == "none":
+        return full
+    try:
+        new_h,new_w=smart_resize(orig_h,orig_w,factor,min_pixels,max_pixels)
+    except ValueError:
+        return None
+    scale_w=new_w/orig_w
+    scale_h=new_h/orig_h
+    triples=parse_triples(answer,strict=False,where="bbox_rescale")
+    if not triples:
+        return None
+    scaled_triples:List[EntityTriple]=[]
+    for triple in triples:
+        if not triple.region_valid:
+            return None
+        if triple.regions is None:
+            scaled_triples.append(triple)
+            continue
+        scaled_regions: List[Box] = []
+        for box in triple.regions:
+            x1, y1, x2, y2 =scale_box_xyxy(box,scale_w,scale_h,new_w,new_h)
+            scaled_regions.append(
+                (float(x1), float(y1), float(x2), float(y2))
+            )
+    
+    scaled_triples.append(
+            EntityTriple(
+                text=triple.text,
+                etype=triple.etype,
+                regions=scaled_regions,
+                region_valid=True,
+            ))
+    scaled_answer=triples_to_canon_text(scaled_triples)
+    return replace_answer_text(full,scaled_answer)
