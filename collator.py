@@ -200,12 +200,15 @@ class Qwen25VLSFTCollator:
         batch: List[Dict[str, Any]],
     )->Optional[Dict[str, Any]]:
         prepared = self._prepare_valid_batch(batch)
+        if prepared is None:
+            return None
         prompt_texts, full_texts = self._build_template_texts(prepared)
         full_inputs, prompt_inputs = self._encode_texts_and_images(
         prompt_texts=prompt_texts,
         full_texts=full_texts,
         images=prepared["images"],
     )
+
         full_inputs=self._build_labels(full_inputs, prompt_inputs)
         
         full_inputs["gold_texts"]=prepared["scaled_assistant_texts"]
