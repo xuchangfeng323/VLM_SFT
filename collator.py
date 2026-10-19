@@ -27,6 +27,8 @@ class Qwen25VLSFTCollator:
         self.max_length = max_length
         self.factor = factor
         self.system_prompt = system_prompt
+        if self.system_prompt is None:
+            self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.system_prompt=self.system_prompt.strip()
         image_processor = getattr(processor, "image_processor", None)
         self.min_pixels = int(

@@ -4,13 +4,17 @@ import os
 import random
 from datetime import datetime
 from tqdm.auto import tqdm
-from re import T
-from dataset import VLM_SFTDataset
+from typing import Optional
+from dataprocess import TwitterGroundedMNERJsonl
 import numpy as np
 import torch
+from accelerate import Accelerator
+from collator import Qwen25VLSFTCollator
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from utils import parse_triples,extract_answer_text
+from metrics import count_correct_mner,count_correct_eeg,count_correct_gmner
 from transformers import (
     AutoProcessor,
     Qwen2_5_VLForConditionalGeneration,
@@ -70,6 +74,7 @@ def main():
     parser.add_argument("--lora_alpha", type=int, default=64)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--dtype", type=str, default="bfloat16")
+    parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument(
         "--lora_target_modules",
         type=str,
@@ -101,8 +106,8 @@ def main():
     is_cuda_device = torch.cuda.is_available()
     g = torch.Generator()
     g.manual_seed(args.seed) 
-    accelerator = Accelerator(mixed_precision="fp32", gradient_accumulation_steps=args.grad_accum_steps)
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.model_name, **model_kwargs)
+    accelerator = Accelerator( gradient_accumulation_steps=args.grad_accum_steps)
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.model_name, dtype=args.dtype, trust_remote_code=True)
     for p in model.parameters():
         p.requires_grad = False
     if hasattr(model, "config") and hasattr(model.config, "use_cache"):
@@ -135,10 +140,10 @@ def main():
         min_pixels=args.min_pixels,
         max_pixels=args.max_pixels,
         factor=28,
-        do_jitter=False,
         system_prompt=args.system_prompt,
     )
-    train_dataset = VLM_SFTDataset(args.train_jsonl, processor, args.max_length, args.min_pixels, args.max_pixels)
+    tokenizer = processor.tokenizer
+    train_dataset = TwitterGroundedMNERJsonl(args.train_jsonl, image_root=args.image_root)
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -152,7 +157,7 @@ def main():
     )
     train_loader = accelerator.prepare(train_loader)
     if args.dev_jsonl is not None:
-        dev_dataset = VLM_SFTDataset(args.dev_jsonl, processor, args.max_length, args.min_pixels, args.max_pixels)
+        dev_dataset = TwitterGroundedMNERJsonl(args.dev_jsonl, image_root=args.image_root)
         dev_loader = DataLoader(
             dev_dataset,
             batch_size=args.dev_batch_size,
@@ -170,7 +175,7 @@ def main():
     else:
         dev_dataset = None
     if args.test_jsonl is not None:
-        test_dataset = VLM_SFTDataset(args.test_jsonl, processor, args.max_length, args.min_pixels, args.max_pixels)
+        test_dataset = TwitterGroundedMNERJsonl(args.test_jsonl, image_root=args.image_root)
         test_loader = DataLoader(
             test_dataset,
             batch_size=args.test_batch_size,
@@ -208,6 +213,8 @@ def main():
     optimizer, scheduler = accelerator.prepare(optimizer, scheduler)
     for epoch in range(args.epochs):
         model.train()
+        if is_cuda_device:
+            torch.cuda.empty_cache()
         if hasattr(model, "config") and hasattr(model.config, "use_cache"):
             model.config.use_cache = False
         progress_bar = tqdm(
@@ -219,16 +226,20 @@ def main():
         optimizer.zero_grad()
         for step, batch in progress_bar:
              with accelerator.accumulate(model):
+                if batch is None:
+                    continue
                 vision_input = {}
                 for k in ["pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"]:
                     if k in batch:
                         vision_input[k] = batch[k]
                 loss = model(
-                    inputs=batch["inputs"],
+                    input_ids=batch["input_ids"],
                     attention_mask=batch["attention_mask"],
                     labels=batch["labels"],
                     **vision_input).loss
                 accelerator.backward(loss)
+                if args.max_grad_norm > 0.0 and accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(trainable_params, max_norm=args.max_grad_norm)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
@@ -240,12 +251,50 @@ def main():
 
         if hasattr(model, "config") and hasattr(model.config, "use_cache"):
             model.config.use_cache = True
-        dev_progress_bar = tqdm(
-        enumerate(dev_loader),
-        total=len(dev_loader),
-        desc=f"Epoch {epoch + 1}/{args.epochs}",
-        disable=not accelerator.is_main_process
-        )
-        dev_loss = 0.0
-        dev_num_samples = 0
-        
+        best_dev_gmner_f1=-1
+        if dev_dataset is not None:
+            model.eval()
+            dev_progress_bar = tqdm(
+            enumerate(dev_loader),
+            total=len(dev_loader),
+            desc=f"Epoch {epoch + 1}/{args.epochs}",
+            disable=not accelerator.is_main_process
+            )
+            dev_loss = 0.0
+            dev_num_samples = 0
+            for dev_step, dev_batch in dev_progress_bar:
+                if dev_batch is None:
+                    continue
+                eeg_correct=0
+                gmner_correct=0
+                mnner_correct=0
+                with torch.inference_mode():
+                    vision_input = {}
+                    for k in ["pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"]:
+                        if k in dev_batch:
+                            vision_input[k] = dev_batch[k]
+                    generated_ids = model.generate(
+                        input_ids=dev_batch["prompt_input_ids"],
+                        attention_mask=dev_batch["prompt_attention_mask"],
+                        **vision_input,
+                        max_new_tokens=args.eval_max_new_tokens,
+                        use_cache=True,
+                        do_sample=False,
+                        pad_token_id=tokenizer.pad_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                        )
+                    generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(dev_batch["prompt_input_ids"], generated_ids)]     
+                    response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+                    gold_texts = dev_batch["gold_texts"]
+                    
+                    for i ,(pred_text, gold_text) in enumerate(zip(pred_text, gold_texts)):
+                        pred_text = (pred_text or "").strip()
+                        gold_text = (gold_text or "").strip()
+                        gold_ans=extract_answer_text(gold_text)
+                        pred_ans=extract_answer_text(pred_text)
+                        bad_pred_bbox += sum(1 for t in pred_triples if not t.region_valid)
+                        pred_triples=parse_triples(pred_ans)
+                        gold_triples=parse_triples(gold_ans)
+                        gmner_pred += len(pred_triples)
+                        gmner_gold += len(gold_triples)
+                        gmner_correct+=count_correct_triples(pred_triples, gold_triples)
