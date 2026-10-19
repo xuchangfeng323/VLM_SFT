@@ -15,13 +15,17 @@ from collator import Qwen25VLSFTCollator
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from utils import parse_triples,extract_answer_text
 from metrics import count_correct_mner,count_correct_eeg,count_correct_gmner,Metric_Result,prf
 from transformers import (
     AutoProcessor,
     Qwen2_5_VLForConditionalGeneration,
     get_cosine_schedule_with_warmup,
 )
+import gc
+import json
+from dataclasses import asdict
+from peft import LoraConfig, PeftModel, get_peft_model
+from utils import EntityTriple, parse_triples, extract_answer_text
 def seed_everything(seed: Optional[int] = 42, *, verbose: bool = True):
 
     #随机种子固定
@@ -77,7 +81,6 @@ def main():
     parser.add_argument("--lora_alpha", type=int, default=64)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--bfloat16", action="store_true")
-    parser.add_argument("--output_dir",type=str, default="./outputs/qwen25vl_7b_lora")
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument(
         "--lora_target_modules",
@@ -106,7 +109,8 @@ def main():
 
     args = parser.parse_args()
     accelerator = Accelerator( gradient_accumulation_steps=args.grad_accum_steps)
-    if args.use_swanlab and accelerator.is_main_process:
+    use_swanlab = args.use_swanlab
+    if use_swanlab and accelerator.is_main_process:
         swanlab.init(
             project="qwen4ner",
             name=(
@@ -198,7 +202,12 @@ def main():
         model.config.use_cache = False
     model.train()
     model.print_trainable_parameters()
-    processor = AutoProcessor.from_pretrained(args.model_name, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(
+    args.model_name,
+    min_pixels=args.min_pixels,
+    max_pixels=args.max_pixels,
+    trust_remote_code=True,
+            )
     collator = Qwen25VLSFTCollator(
         processor=processor,
         max_length=args.max_length,
@@ -276,13 +285,16 @@ def main():
     warmup_steps = int(total_steps * args.warmup_ratio)
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
     optimizer, scheduler = accelerator.prepare(optimizer, scheduler)
+    best_dev_gmner_f1=-1
+    early_stop_counter=0
     for epoch in range(args.epochs):
         model.train()
-        early_stop_counter=0
-        log_dir=os.path.join(args.output_dir,"log.jsonl")
+        
+        log_path = os.path.join(args.output_dir, "log.jsonl")
+        os.makedirs(args.output_dir, exist_ok=True)
         best_checkpoint=os.path.join(args.output_dir,"best_model")
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir)
+        if not os.path.exists(log_path):
+            os.makedirs(log_path)
         if is_cuda_device:
             torch.cuda.empty_cache()
         if hasattr(model, "config") and hasattr(model.config, "use_cache"):
@@ -333,7 +345,7 @@ def main():
 
         if hasattr(model, "config") and hasattr(model.config, "use_cache"):
             model.config.use_cache = True
-        best_dev_gmner_f1=-1
+        
         eeg_correct=0
         gmner_correct=0
         mner_correct=0
@@ -348,7 +360,16 @@ def main():
             disable=not accelerator.is_main_process
             )
             record_response_dir=os.path.join(args.output_dir,f"dev_{epoch+1}.jsonl")
-           
+            bad_pred_bbox = 0
+            gmner_correct = 0
+            gmner_pred = 0
+            gmner_gold = 0
+            mner_correct = 0
+            mner_pred = 0
+            mner_gold = 0
+            eeg_correct = 0
+            eeg_pred = 0
+            eeg_gold = 0
             for dev_step, dev_batch in dev_progress_bar:
                 if dev_batch is None:
                     continue
@@ -383,13 +404,13 @@ def main():
                         bad_pred_bbox += sum(1 for t in pred_triples if not t.region_valid)
                         gmner_pred += len(pred_triples)
                         gmner_gold += len(gold_triples)
-                        gmner_correct+=count_correct_gmner(pred_triples, gold_triples)
+                        gmner_correct+=count_correct_gmner(pred_triples, gold_triples,iou_threshold=args.eval_iou,)
                         mner_pred += len(pred_triples)
                         mner_gold += len(gold_triples)
                         mner_correct+=count_correct_mner(pred_triples, gold_triples)
                         eeg_pred += len(pred_triples)
                         eeg_gold += len(gold_triples)
-                        eeg_correct+=count_correct_eeg(pred_triples, gold_triples)
+                        eeg_correct+=count_correct_eeg(pred_triples, gold_triples,iou_threshold=args.eval_iou,)
         eeg_metric=prf(eeg_correct, eeg_pred, eeg_gold, "eeg")
         gmner_metric=prf(gmner_correct, gmner_pred, gmner_gold, "gmner")
         mner_metric=prf(mner_correct, mner_pred, mner_gold, "mner")
@@ -422,10 +443,15 @@ def main():
         if best_dev_gmner_f1 < gmner_metric.f1:
             best_dev_gmner_f1=gmner_metric.f1
             early_stop_counter=0
-            save_best_model(best_checkpoint,accelerator)
+            save_best_adapter(
+                    best_checkpoint,
+                    model,
+                    processor,
+                    accelerator,
+                )
         else :
             early_stop_counter+=1
-            if early_stop_counter>=args.early_stop_patience:
+            if early_stop_counter>=args.patience:
                 print("Early stop")
                 break
             else:
@@ -459,23 +485,24 @@ def test(test_loader,model_dir,adapter_dir,out_dir,accelerator):
     processor = AutoProcessor.from_pretrained(model_dir,trust_remote_code=True)
     base_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_dir,trust_remote_code=True)
     model=PeftModel.from_pretrained(base_model,adapter_dir)
-    model,test_dataloader=accelerator.prepare(model,test_loader)
+    model=accelerator.prepare(model)
+    tokenizer=processor.tokenizer
     model.eval()
     with torch.inference_mode():
         test_progress_bar = tqdm(
-            enumerate(test_dataloader),
-            total=len(test_dataloader),
+            enumerate(test_loader),
+            total=len(test_loader),
             desc=f"Test",
             disable=not accelerator.is_main_process
             )
         for test_batch in test_progress_bar:
             vision_input = {}
                     for k in ["pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"]:
-                        if k in dev_batch:
-                            vision_input[k] = dev_batch[k]
+                        if k in test_batch:
+                            vision_input[k] = test_batch[k]
                     generated_ids = model.generate(
-                        input_ids=dev_batch["prompt_input_ids"],
-                        attention_mask=dev_batch["prompt_attention_mask"],
+                        input_ids=test_batch["prompt_input_ids"],
+                        attention_mask=test_batch["prompt_attention_mask"],
                         **vision_input,
                         max_new_tokens=args.eval_max_new_tokens,
                         use_cache=True,
@@ -499,13 +526,13 @@ def test(test_loader,model_dir,adapter_dir,out_dir,accelerator):
                         bad_pred_bbox += sum(1 for t in pred_triples if not t.region_valid)
                         gmner_pred += len(pred_triples)
                         gmner_gold += len(gold_triples)
-                        gmner_correct+=count_correct_gmner(pred_triples, gold_triples)
+                        gmner_correct+=count_correct_gmner(pred_triples, gold_triples,iou_threshold=args.eval_iou)
                         mner_pred += len(pred_triples)
                         mner_gold += len(gold_triples)
                         mner_correct+=count_correct_mner(pred_triples, gold_triples)
                         eeg_pred += len(pred_triples)
                         eeg_gold += len(gold_triples)
-                        eeg_correct+=count_correct_eeg(pred_triples, gold_triples)
+                        eeg_correct+=count_correct_eeg(pred_triples, gold_triples,iou_threshold=args.eval_iou)
         eeg_metric=prf(eeg_correct, eeg_pred, eeg_gold, "eeg")
         gmner_metric=prf(gmner_correct, gmner_pred, gmner_gold, "gmner")
         mner_metric=prf(mner_correct, mner_pred, mner_gold, "mner")
@@ -569,12 +596,12 @@ def reord_respone(
 ):
     if dir is None:
         return
-    record={
-        "response":response,
-        "gold_texts":gold_texts,
-        "pred_triples":pred_triples,
-        "gold_triples":gold_triples,
-    }
+    record = {
+    "response": response,
+    "gold_texts": gold_texts,
+    "pred_triples": [asdict(t) for t in pred_triples],
+    "gold_triples": [asdict(t) for t in gold_triples],
+        }
     with open(dir, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False, indent=4) + "\n")
     
