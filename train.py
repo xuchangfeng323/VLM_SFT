@@ -14,7 +14,7 @@ from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from utils import parse_triples,extract_answer_text
-from metrics import count_correct_mner,count_correct_eeg,count_correct_gmner
+from metrics import count_correct_mner,count_correct_eeg,count_correct_gmner,Metric_Result,prf
 from transformers import (
     AutoProcessor,
     Qwen2_5_VLForConditionalGeneration,
@@ -252,6 +252,9 @@ def main():
         if hasattr(model, "config") and hasattr(model.config, "use_cache"):
             model.config.use_cache = True
         best_dev_gmner_f1=-1
+        eeg_correct=0
+        gmner_correct=0
+        mnner_correct=0
         if dev_dataset is not None:
             model.eval()
             dev_progress_bar = tqdm(
@@ -265,9 +268,6 @@ def main():
             for dev_step, dev_batch in dev_progress_bar:
                 if dev_batch is None:
                     continue
-                eeg_correct=0
-                gmner_correct=0
-                mnner_correct=0
                 with torch.inference_mode():
                     vision_input = {}
                     for k in ["pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"]:
@@ -287,7 +287,7 @@ def main():
                     response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
                     gold_texts = dev_batch["gold_texts"]
                     
-                    for i ,(pred_text, gold_text) in enumerate(zip(pred_text, gold_texts)):
+                    for pred_text, gold_text in zip(response, gold_texts):
                         pred_text = (pred_text or "").strip()
                         gold_text = (gold_text or "").strip()
                         gold_ans=extract_answer_text(gold_text)
@@ -297,4 +297,23 @@ def main():
                         gold_triples=parse_triples(gold_ans)
                         gmner_pred += len(pred_triples)
                         gmner_gold += len(gold_triples)
-                        gmner_correct+=count_correct_triples(pred_triples, gold_triples)
+                        gmner_correct+=count_correct_gmner(pred_triples, gold_triples)
+                        gmner_metric=prf(gmner_correct, gmner_pred, gmner_gold, "gmner")
+                        mner_pred += len(pred_triples)
+                        mner_gold += len(gold_triples)
+                        mner_correct+=count_correct_mner(pred_triples, gold_triples)
+                        mner_metric=prf(mner_correct, mner_pred, mner_gold, "mner")
+                        eeg_pred += len(pred_triples)
+                        eeg_gold += len(gold_triples)
+                        eeg_correct+=count_correct_eeg(pred_triples, gold_triples)
+                        eeg_metric=prf(eeg_correct, eeg_pred, eeg_gold, "eeg")
+                        print("========== DEV GMNER (entity + type + region) ==========")
+                        print(f"GMNER P: {gmner_metric.p:.4f},GMNER R: {gmner_metric.r:.4f},GMNER F1: {gmner_metric.f1:.4f}")
+                        print("========== DEV MNER (entity + type) ==========")
+                        print(f"MNER P: {mner_metric.p:.4f},MNER R: {mner_metric.r:.4f},MNER F1: {mner_metric.f1:.4f}")
+                        print("========== DEV EEG (entity + type) ==========")
+                        print(f"EEG P: {eeg_metric.p:.4f},EEG R: {eeg_metric.r:.4f},EEG F1: {eeg_metric.f1:.4f}")
+
+
+
+

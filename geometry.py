@@ -3,32 +3,32 @@ from typing import Tuple, List, Optional
 import re
 from utils import Box, extract_answer_text,EntityTriple, triples_to_canon_text, parse_triples
 def smart_resize(
-    height: int,
-    width: int,
-    factor: int = 28,
-    min_pixels: int = 56 * 56,
-    max_pixels: int = 14 * 14 * 4 * 1280,
-)-> Tuple[int, int]:
-    if height < factor or width < factor:
+    height: int, width: int, factor: int = 28, min_pixels: int = 56 * 56, max_pixels: int = 14 * 14 * 4 * 1280
+):
+    """Rescales the image so that the following conditions are met:
+
+    1. Both dimensions (height and width) are divisible by 'factor'.
+
+    2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
+
+    3. The aspect ratio of the image is maintained as closely as possible.
+
+    """
+    if max(height, width) / min(height, width) > 200:
         raise ValueError(
-            f"height and width must be at least {factor}, "
-            f"got height={height}, width={width}"
+            f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
         )
-    image_ratio=max(height,width)/min(height,width)
-    if image_ratio>200:raise ValueError(
-            f"aspect ratio must be at most 200, got {image_ratio}"
-        )
-    new_height=round(height/factor)*factor
-    new_width=round(width/factor)*factor
-    if new_height*new_width<min_pixels:
-        scale=math.sqrt(min_pixels/new_height/new_width)
-        new_height=math.floor(height*scale/factor)*factor
-        new_width=math.floor(width*scale/factor)*factor
-    if new_height*new_width>max_pixels:
-        scale=math.sqrt(max_pixels/new_height/new_width)
-        new_height=math.floor(height*scale/factor)*factor
-        new_width=math.floor(width*scale/factor)*factor
-    return new_height,new_width
+    h_bar = round(height / factor) * factor
+    w_bar = round(width / factor) * factor
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = max(factor, math.floor(height / beta / factor) * factor)
+        w_bar = max(factor, math.floor(width / beta / factor) * factor)
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = math.ceil(height * beta / factor) * factor
+        w_bar = math.ceil(width * beta / factor) * factor
+    return h_bar, w_bar
 def _clamp_int(
     value: int,
     low: int,

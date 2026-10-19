@@ -3,6 +3,14 @@ from typing import Tuple,Dict,List
 import json
 import re
 from functools import lru_cache
+@classmethod
+@dataclass(frozen=True)
+class Metric_Result:
+    task: str
+    p: float
+    r: float
+    f1: float
+    
 # 计算两个Box的IOU
 def iou(box1: Box, box2: Box) -> float:
     x1, y1, x2, y2 = box1
@@ -120,11 +128,12 @@ def count_correct_gmner(
 # 计算P, R, F1
 def prf(correct: int,
         predicted_len: int,
-        gold_len: int,)->Tuple[float, float, float]:
+        gold_len: int,
+        task: str,)->Metric_Result:
     p=correct/(predicted_len+1e-10)
     r=correct/(gold_len+1e-10)
     f=2*p*r/(p+r) if p+r > 0 else 0
-    return p, r, f
+    return Metric_Result(task=task, p=p, r=r, f1=f)
 
 def count_correct_eeg(
     pred_triples: List[EntityTriple],
