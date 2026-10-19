@@ -1,8 +1,10 @@
 import argparse
 import math
 import os
+import swanlab
 import random
 from datetime import datetime
+from accelerate.tracking import SwanLabTracker
 from tqdm.auto import tqdm
 from typing import Optional
 from dataprocess import TwitterGroundedMNERJsonl
@@ -45,6 +47,7 @@ def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-VL-7B-Instruct")
+    parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--train_jsonl", type=str, required=True, help="Path to the training jsonl file.")
     parser.add_argument(
         "--dev_jsonl",
@@ -73,7 +76,8 @@ def main():
     parser.add_argument("--lora_r", type=int, default=32)
     parser.add_argument("--lora_alpha", type=int, default=64)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
-    parser.add_argument("--dtype", type=str, default="bfloat16")
+    parser.add_argument("--bfloat16", action="store_true")
+    parser.add_argument("--output_dir",type=str, default="./outputs/qwen25vl_7b_lora")
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument(
         "--lora_target_modules",
@@ -95,19 +99,80 @@ def main():
     parser.add_argument("--test_batch_size", type=int, default=2)
     parser.add_argument("--eval_max_new_tokens", type=int, default=512)
     parser.add_argument("--eval_iou", type=float, default=0.5)
+    parser.add_argument(
+    "--use_swanlab",
+    action="store_true",
+    help="是否启用 SwanLab 实验记录")
+
     args = parser.parse_args()
+    accelerator = Accelerator( gradient_accumulation_steps=args.grad_accum_steps)
+    if args.use_swanlab and accelerator.is_main_process:
+        swanlab.init(
+            project="qwen4ner",
+            name=(
+                f"{args.model_name.rstrip('/').split('/')[-1]}"
+                f"-LoRA-r{args.lora_r}"
+                f"-lr{args.lr}"
+                f"-seed{args.seed}"
+
+            ),
+            config={
+                # 模型与训练
+                "model": args.model_name,
+                "method": "LoRA",
+                "num_epochs": args.epochs,
+                "lr": args.lr,
+                "batch_size": args.batch_size,
+                "grad_accum_steps": args.grad_accum_steps,
+                "weight_decay": args.weight_decay,
+                "warmup_ratio": args.warmup_ratio,
+                "max_grad_norm": args.max_grad_norm,
+                "max_length": args.max_length,
+                "grad_ckpt": args.grad_ckpt,
+                "seed": args.seed,
+
+                # 运行环境
+                "device": str(accelerator.device),
+                "num_processes": accelerator.num_processes,
+                "num_workers": args.num_workers,
+
+                # 数据与图片
+                "train_jsonl": args.train_jsonl,
+                "dev_jsonl": args.dev_jsonl,
+                "test_jsonl": args.test_jsonl,
+                "image_root": args.image_root,
+                "min_pixels": args.min_pixels,
+                "max_pixels": args.max_pixels,
+
+                # LoRA
+                "lora_r": args.lora_r,
+                "lora_alpha": args.lora_alpha,
+                "lora_dropout": args.lora_dropout,
+                "lora_target_modules": args.lora_target_modules,
+
+                # 评估与输出
+                "dev_batch_size": args.dev_batch_size,
+                "test_batch_size": args.test_batch_size,
+                "eval_max_new_tokens": args.eval_max_new_tokens,
+                "eval_iou": args.eval_iou,
+                "output_dir": args.output_dir,
+            },
+        )
     seed_everything(args.seed)
     def seed_worker(worker_id: int):
         worker_seed = args.seed + worker_id
         np.random.seed(worker_seed)
         random.seed(worker_seed)
         torch.manual_seed(worker_seed)
-
+    if os.path.exists(args.output_dir):
+        raise ValueError(f"Output directory {args.output_dir} already exists.")
+    else:
+        os.makedirs(args.output_dir )
+    
     is_cuda_device = torch.cuda.is_available()
     g = torch.Generator()
     g.manual_seed(args.seed) 
-    accelerator = Accelerator( gradient_accumulation_steps=args.grad_accum_steps)
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.model_name, dtype=args.dtype, trust_remote_code=True)
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.model_name, dtype=torch.bfloat16 if args.bfloat16 else None, trust_remote_code=True)
     for p in model.parameters():
         p.requires_grad = False
     if hasattr(model, "config") and hasattr(model.config, "use_cache"):
@@ -213,6 +278,11 @@ def main():
     optimizer, scheduler = accelerator.prepare(optimizer, scheduler)
     for epoch in range(args.epochs):
         model.train()
+        early_stop_counter=0
+        log_dir=os.path.join(args.output_dir,"log.jsonl")
+        best_checkpoint=os.path.join(args.output_dir,"best_model")
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
         if is_cuda_device:
             torch.cuda.empty_cache()
         if hasattr(model, "config") and hasattr(model.config, "use_cache"):
@@ -243,18 +313,32 @@ def main():
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
-                if accelerator.is_main_process:
-                    progress_bar.set_postfix(
-                        loss=f"{loss.detach().float().item():.4f}",
-                        lr=f"{scheduler.get_last_lr()[0]:.2e}"
-                    )   
+                loss_for_log = loss.detach().float()
+                if accelerator.sync_gradients:
+                    loss_for_log = loss.detach().float()
+                    mean_loss = accelerator.reduce(
+                                    loss_for_log,
+                                    reduction="mean",
+                                ).item()
+                    if accelerator.is_main_process:
+                        progress_bar.set_postfix(
+                            loss=f"{mean_loss:.4f}",
+                            lr=f"{scheduler.get_last_lr()[0]:.2e}"
+                        )
+                        if use_swanlab:
+                            swanlab.log({
+                                "loss": mean_loss,
+                                "lr": scheduler.get_last_lr()[0],
+                            })
 
         if hasattr(model, "config") and hasattr(model.config, "use_cache"):
             model.config.use_cache = True
         best_dev_gmner_f1=-1
         eeg_correct=0
         gmner_correct=0
-        mnner_correct=0
+        mner_correct=0
+        pred_texts_list=[]
+        gold_texts_list=[]
         if dev_dataset is not None:
             model.eval()
             dev_progress_bar = tqdm(
@@ -263,8 +347,8 @@ def main():
             desc=f"Epoch {epoch + 1}/{args.epochs}",
             disable=not accelerator.is_main_process
             )
-            dev_loss = 0.0
-            dev_num_samples = 0
+            record_response_dir=os.path.join(args.output_dir,f"dev_{epoch+1}.jsonl")
+           
             for dev_step, dev_batch in dev_progress_bar:
                 if dev_batch is None:
                     continue
@@ -286,34 +370,112 @@ def main():
                     generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(dev_batch["prompt_input_ids"], generated_ids)]     
                     response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
                     gold_texts = dev_batch["gold_texts"]
-                    
+                    pred_texts_list.extend(response)
+                    gold_texts_list.extend(gold_texts)
                     for pred_text, gold_text in zip(response, gold_texts):
                         pred_text = (pred_text or "").strip()
                         gold_text = (gold_text or "").strip()
                         gold_ans=extract_answer_text(gold_text)
                         pred_ans=extract_answer_text(pred_text)
+                        pred_triples=parse_triples(pred_ans,strict=False,where="dev_pred")
+                        gold_triples=parse_triples(gold_ans,strict=False,where="dev_gold")
                         bad_pred_bbox += sum(1 for t in pred_triples if not t.region_valid)
-                        pred_triples=parse_triples(pred_ans)
-                        gold_triples=parse_triples(gold_ans)
                         gmner_pred += len(pred_triples)
                         gmner_gold += len(gold_triples)
                         gmner_correct+=count_correct_gmner(pred_triples, gold_triples)
-                        gmner_metric=prf(gmner_correct, gmner_pred, gmner_gold, "gmner")
                         mner_pred += len(pred_triples)
                         mner_gold += len(gold_triples)
                         mner_correct+=count_correct_mner(pred_triples, gold_triples)
-                        mner_metric=prf(mner_correct, mner_pred, mner_gold, "mner")
                         eeg_pred += len(pred_triples)
                         eeg_gold += len(gold_triples)
                         eeg_correct+=count_correct_eeg(pred_triples, gold_triples)
-                        eeg_metric=prf(eeg_correct, eeg_pred, eeg_gold, "eeg")
-                        print("========== DEV GMNER (entity + type + region) ==========")
-                        print(f"GMNER P: {gmner_metric.p:.4f},GMNER R: {gmner_metric.r:.4f},GMNER F1: {gmner_metric.f1:.4f}")
-                        print("========== DEV MNER (entity + type) ==========")
-                        print(f"MNER P: {mner_metric.p:.4f},MNER R: {mner_metric.r:.4f},MNER F1: {mner_metric.f1:.4f}")
-                        print("========== DEV EEG (entity + type) ==========")
-                        print(f"EEG P: {eeg_metric.p:.4f},EEG R: {eeg_metric.r:.4f},EEG F1: {eeg_metric.f1:.4f}")
+        eeg_metric=prf(eeg_correct, eeg_pred, eeg_gold, "eeg")
+        gmner_metric=prf(gmner_correct, gmner_pred, gmner_gold, "gmner")
+        mner_metric=prf(mner_correct, mner_pred, mner_gold, "mner")
+        print("========== DEV GMNER (entity + type + region) ==========")
+        print(f"GMNER P: {gmner_metric.p:.4f},GMNER R: {gmner_metric.r:.4f},GMNER F1: {gmner_metric.f1:.4f}")
+        print("========== DEV MNER (entity + type) ==========")
+        print(f"MNER P: {mner_metric.p:.4f},MNER R: {mner_metric.r:.4f},MNER F1: {mner_metric.f1:.4f}")
+        print("========== DEV EEG (entity + type) ==========")
+        print(f"EEG P: {eeg_metric.p:.4f},EEG R: {eeg_metric.r:.4f},EEG F1: {eeg_metric.f1:.4f}")
+        if accelerator.is_main_process:
+            if use_swanlab :
+                swanlab.log({
+                    "gmner_f1": gmner_metric.f1,
+                    "mner_f1": mner_metric.f1,
+                    "eeg_f1": eeg_metric.f1,
+                                })
+            log_record={
+                "gmner_f1": gmner_metric.f1,
+                "gmner_p": gmner_metric.p,
+                "gmner_r": gmner_metric.r,
+                "mner_f1": mner_metric.f1,
+                "mner_p": mner_metric.p,
+                "mner_r": mner_metric.r,
+                "eeg_f1": eeg_metric.f1,
+                "eeg_p": eeg_metric.p,
+                "eeg_r": eeg_metric.r,
+                        }
+            with open(log_dir, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_record, ensure_ascii=False) + "\n")
+        if best_dev_gmner_f1 < gmner_metric.f1:
+            best_dev_gmner_f1=gmner_metric.f1
+            early_stop_counter=0
+            save_best_model(best_checkpoint,accelerator)
+        else :
+            early_stop_counter+=1
+            if early_stop_counter>=args.early_stop_patience:
+                print("Early stop")
+                break
+            else:
+                pass
+    if test_dataset is  None:
+        return
+        test_progress_bar = tqdm(
+            enumerate(test_loader),
+            total=len(test_loader),
+            desc=f"Epoch {epoch + 1}/{args.epochs}",
+            disable=not accelerator.is_main_process
+            )
+    
+    
+        
 
+def save_best_model(best_checkpoint,accelerator):
+    accelerator.save_model(best_checkpoint)
+    accelerator.wait_for_everyone()
+    unwrapped_model = accelerator.unwrap_model(model)
+    unwrapped_model.save_pretrained(
+        adapter_dir,
+        is_main_process=accelerator.is_main_process,
+        save_function=accelerator.save,
+        state_dict=accelerator.get_state_dict(model),
+        safe_serialization=True,
+    )
+    if accelerator.is_main_process:
+        processor.save_pretrained(adapter_dir)
+    accelerator.wait_for_everyone()
+    
 
+def reord_dev_respone(
+    response:str,
+    gold_texts:str,
+    pred_triples:list[EntityTriple],
+    gold_triples:list[EntityTriple],
+    dir,
+):
+    if dir is None:
+        return
+    record={
+        "response":response,
+        "gold_texts":gold_texts,
+        "pred_triples":pred_triples,
+        "gold_triples":gold_triples,
+    }
+    with open(dir, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False, indent=4) + "\n")
+    
 
+if __name__ == "__main__":
+    main()
 

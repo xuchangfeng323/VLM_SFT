@@ -3,7 +3,8 @@ from typing import Tuple,Dict,List
 import json
 import re
 from functools import lru_cache
-@classmethod
+from dataclasses import dataclass
+
 @dataclass(frozen=True)
 class Metric_Result:
     task: str
