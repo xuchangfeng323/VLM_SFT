@@ -379,6 +379,7 @@ def main():
                         pred_ans=extract_answer_text(pred_text)
                         pred_triples=parse_triples(pred_ans,strict=False,where="dev_pred")
                         gold_triples=parse_triples(gold_ans,strict=False,where="dev_gold")
+                        reord_respone(response,gold_text,pred_triples,gold_triples,record_response_dir)
                         bad_pred_bbox += sum(1 for t in pred_triples if not t.region_valid)
                         gmner_pred += len(pred_triples)
                         gmner_gold += len(gold_triples)
@@ -429,35 +430,137 @@ def main():
                 break
             else:
                 pass
-    if test_dataset is  None:
-        return
+    if test_dataset is not None:
+        del model
+        gc.collect()
+        test_result=test(test_loader,model_dir,adapter_dir,out_dir,accelerator)
+        with open(test_result_dir, "a", encoding="utf-8") as f:
+            f.write(json.dumps(test_result, ensure_ascii=False) + "\n")
+        if use_swanlab :
+            swanlab.log(
+                {
+                    "test_gmner_f1": test_result["gmner"].f1,
+                    "test_mner_f1": test_result["mner"].f1,
+                    "test_eeg_f1": test_result["eeg"].f1,
+                    "test_gmner_p": test_result["gmner"].p,
+                    "test_gmner_r": test_result["gmner"].r,
+                    "test_mner_p": test_result["mner"].p,
+                    "test_mner_r": test_result["mner"].r,
+                    "test_eeg_p": test_result["eeg"].p,
+                    "test_eeg_r": test_result["eeg"].r,
+                }
+            )
+        
+def test(test_loader,model_dir,adapter_dir,out_dir,accelerator):
+    if accelerator is None:
+        accelerator=Accelerator()
+    test_result_dir=os.path.join(out_dir,"test_result.jsonl")
+    test_response_dir=os.path.join(out_dir,"test_response.jsonl")
+    processor = AutoProcessor.from_pretrained(model_dir,trust_remote_code=True)
+    base_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_dir,trust_remote_code=True)
+    model=PeftModel.from_pretrained(base_model,adapter_dir)
+    model,test_dataloader=accelerator.prepare(model,test_loader)
+    model.eval()
+    with torch.inference_mode():
         test_progress_bar = tqdm(
-            enumerate(test_loader),
-            total=len(test_loader),
-            desc=f"Epoch {epoch + 1}/{args.epochs}",
+            enumerate(test_dataloader),
+            total=len(test_dataloader),
+            desc=f"Test",
             disable=not accelerator.is_main_process
             )
-    
-    
-        
+        for test_batch in test_progress_bar:
+            vision_input = {}
+                    for k in ["pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"]:
+                        if k in dev_batch:
+                            vision_input[k] = dev_batch[k]
+                    generated_ids = model.generate(
+                        input_ids=dev_batch["prompt_input_ids"],
+                        attention_mask=dev_batch["prompt_attention_mask"],
+                        **vision_input,
+                        max_new_tokens=args.eval_max_new_tokens,
+                        use_cache=True,
+                        do_sample=False,
+                        pad_token_id=tokenizer.pad_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                        )
+                    generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(dev_batch["prompt_input_ids"], generated_ids)]     
+                    response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+                    gold_texts = dev_batch["gold_texts"]
+                    pred_texts_list.extend(response)
+                    gold_texts_list.extend(gold_texts)
+                    for pred_text, gold_text in zip(response, gold_texts):
+                        pred_text = (pred_text or "").strip()
+                        gold_text = (gold_text or "").strip()
+                        gold_ans=extract_answer_text(gold_text)
+                        pred_ans=extract_answer_text(pred_text)
+                        pred_triples=parse_triples(pred_ans,strict=False,where="test_pred")
+                        gold_triples=parse_triples(gold_ans,strict=False,where="test_gold")
+                        reord_respone(response,gold_text,pred_triples,gold_triples,test_response_dir)
+                        bad_pred_bbox += sum(1 for t in pred_triples if not t.region_valid)
+                        gmner_pred += len(pred_triples)
+                        gmner_gold += len(gold_triples)
+                        gmner_correct+=count_correct_gmner(pred_triples, gold_triples)
+                        mner_pred += len(pred_triples)
+                        mner_gold += len(gold_triples)
+                        mner_correct+=count_correct_mner(pred_triples, gold_triples)
+                        eeg_pred += len(pred_triples)
+                        eeg_gold += len(gold_triples)
+                        eeg_correct+=count_correct_eeg(pred_triples, gold_triples)
+        eeg_metric=prf(eeg_correct, eeg_pred, eeg_gold, "eeg")
+        gmner_metric=prf(gmner_correct, gmner_pred, gmner_gold, "gmner")
+        mner_metric=prf(mner_correct, mner_pred, mner_gold, "mner")
+        print("========== TEST GMNER (entity + type + region) ==========")
+        print(f"GMNER P: {gmner_metric.p:.4f},GMNER R: {gmner_metric.r:.4f},GMNER F1: {gmner_metric.f1:.4f}")
+        print("========== TEST MNER (entity + type) ==========")
+        print(f"MNER P: {mner_metric.p:.4f},MNER R: {mner_metric.r:.4f},MNER F1: {mner_metric.f1:.4f}")
+        print("========== TEST EEG (entity + type) ==========")
+        print(f"EEG P: {eeg_metric.p:.4f},EEG R: {eeg_metric.r:.4f},EEG F1: {eeg_metric.f1:.4f}")
+        return {
+            "gmner":gmner_metric,
+            "mner":mner_metric,
+            "eeg":eeg_metric,
+        }
 
-def save_best_model(best_checkpoint,accelerator):
-    accelerator.save_model(best_checkpoint)
+            
+
+
+    
+
+    
+
+    
+
+def save_best_adapter(
+    best_checkpoint_dir,
+    model,
+    processor,
+    accelerator,
+):
     accelerator.wait_for_everyone()
+
+    if accelerator.is_main_process:
+        os.makedirs(best_checkpoint_dir, exist_ok=True)
+
+    accelerator.wait_for_everyone()
+
     unwrapped_model = accelerator.unwrap_model(model)
+    state_dict = accelerator.get_state_dict(model)
+
     unwrapped_model.save_pretrained(
-        adapter_dir,
+        best_checkpoint_dir,
         is_main_process=accelerator.is_main_process,
         save_function=accelerator.save,
-        state_dict=accelerator.get_state_dict(model),
+        state_dict=state_dict,
         safe_serialization=True,
     )
-    if accelerator.is_main_process:
-        processor.save_pretrained(adapter_dir)
-    accelerator.wait_for_everyone()
-    
 
-def reord_dev_respone(
+    if accelerator.is_main_process:
+        processor.save_pretrained(best_checkpoint_dir)
+        print(f"Best adapter saved to: {best_checkpoint_dir}")
+
+    accelerator.wait_for_everyone()
+
+def reord_respone(
     response:str,
     gold_texts:str,
     pred_triples:list[EntityTriple],
