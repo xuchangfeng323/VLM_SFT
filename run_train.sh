@@ -43,7 +43,7 @@ fi
   --output_dir "$OUTPUT_DIR" \
   --epochs 5 \
   --batch_size 2 \
-  --grad_accum_steps 4 \
+  --grad_accum_steps 8 \
   --lr 5e-4 \
   --weight_decay 0.1 \
   --warmup_ratio 0.03 \

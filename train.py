@@ -115,7 +115,7 @@ def main():
     use_swanlab = args.use_swanlab
     if use_swanlab and accelerator.is_main_process:
         swanlab.init(
-            project="qwen4ner",
+            project="qwenvl4gmner",
             name=(
                 f"{args.model_name.rstrip('/').split('/')[-1]}"
                 f"-LoRA-r{args.lora_r}"
