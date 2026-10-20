@@ -196,15 +196,16 @@ def main():
         target_modules=target,
     )
     model = get_peft_model(model, lora_cfg)
-    model = accelerator.prepare(model)
     if args.grad_ckpt and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
     if hasattr(model, "config") and hasattr(model.config, "use_cache"):
         model.config.use_cache = False
+    if accelerator.is_main_process:
+        model.print_trainable_parameters()
+    model = accelerator.prepare(model)
     model.train()
-    model.print_trainable_parameters()
     processor = AutoProcessor.from_pretrained(
     args.model_name,
     min_pixels=args.min_pixels,
@@ -295,8 +296,9 @@ def main():
         
         if is_cuda_device:
             torch.cuda.empty_cache()
-        if hasattr(model, "config") and hasattr(model.config, "use_cache"):
-            model.config.use_cache = False
+        model_config = getattr(accelerator.unwrap_model(model), "config", None)
+        if model_config is not None and hasattr(model_config, "use_cache"):
+            model_config.use_cache = False
         progress_bar = tqdm(
         enumerate(train_loader),
         total=len(train_loader),
@@ -341,8 +343,9 @@ def main():
                                 "lr": scheduler.get_last_lr()[0],
                             })
 
-        if hasattr(model, "config") and hasattr(model.config, "use_cache"):
-            model.config.use_cache = True
+        model_config = getattr(accelerator.unwrap_model(model), "config", None)
+        if model_config is not None and hasattr(model_config, "use_cache"):
+            model_config.use_cache = True
         
         eeg_correct=0
         gmner_correct=0
@@ -376,7 +379,7 @@ def main():
                     for k in ["pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"]:
                         if k in dev_batch:
                             vision_input[k] = dev_batch[k]
-                    generated_ids = model.generate(
+                    generated_ids = accelerator.unwrap_model(model).generate(
                         input_ids=dev_batch["prompt_input_ids"],
                         attention_mask=dev_batch["prompt_attention_mask"],
                         **vision_input,
@@ -508,10 +511,10 @@ def test(args,test_loader,model_dir,adapter_dir,out_dir,accelerator):
             )
         for batch_idx, test_batch in test_progress_bar:
             vision_input = {}
-                    for k in ["pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"]:
+            for k in ["pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"]:
                         if k in test_batch:
                             vision_input[k] = test_batch[k]
-            generated_ids = model.generate(
+            generated_ids = accelerator.unwrap_model(model).generate(
                         input_ids=test_batch["prompt_input_ids"],
                         attention_mask=test_batch["prompt_attention_mask"],
                         **vision_input,
