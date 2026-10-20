@@ -168,10 +168,13 @@ def main():
         np.random.seed(worker_seed)
         random.seed(worker_seed)
         torch.manual_seed(worker_seed)
-    if os.path.exists(args.output_dir):
-        raise ValueError(f"Output directory {args.output_dir} already exists.")
-    else:
-        os.makedirs(args.output_dir )
+    log_path = os.path.join(args.output_dir, "log.jsonl")
+    best_checkpoint = os.path.join(args.output_dir, "best_model")
+    if accelerator.is_main_process:
+        os.makedirs(args.output_dir, exist_ok=False)
+        with open(log_path, "x", encoding="utf-8"):
+            pass
+    accelerator.wait_for_everyone()
     
     is_cuda_device = torch.cuda.is_available()
     g = torch.Generator()
@@ -290,11 +293,6 @@ def main():
     for epoch in range(args.epochs):
         model.train()
         
-        log_path = os.path.join(args.output_dir, "log.jsonl")
-        os.makedirs(args.output_dir, exist_ok=True)
-        best_checkpoint=os.path.join(args.output_dir,"best_model")
-        if not os.path.exists(log_path):
-            os.makedirs(log_path)
         if is_cuda_device:
             torch.cuda.empty_cache()
         if hasattr(model, "config") and hasattr(model.config, "use_cache"):
@@ -438,8 +436,8 @@ def main():
                 "eeg_p": eeg_metric.p,
                 "eeg_r": eeg_metric.r,
                         }
-            with open(log_dir, "a", encoding="utf-8") as f:
-            f.write(json.dumps(log_record, ensure_ascii=False) + "\n")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(log_record, ensure_ascii=False) + "\n")
         if best_dev_gmner_f1 < gmner_metric.f1:
             best_dev_gmner_f1=gmner_metric.f1
             early_stop_counter=0
@@ -459,8 +457,8 @@ def main():
     if test_dataset is not None:
         del model
         gc.collect()
-        test_result=test(test_loader,model_dir,adapter_dir,out_dir,accelerator)
-        with open(test_result_dir, "a", encoding="utf-8") as f:
+        test_result=test(args,test_loader,args.model_dir,best_checkpoint,args.out_dir,accelerator)
+        with open(os.path.join(args.output_dir, "test_result.jsonl"), "a", encoding="utf-8") as f:
             f.write(json.dumps(test_result, ensure_ascii=False) + "\n")
         if use_swanlab :
             swanlab.log(
@@ -477,7 +475,7 @@ def main():
                 }
             )
         
-def test(test_loader,model_dir,adapter_dir,out_dir,accelerator):
+def test(args,test_loader,model_dir,adapter_dir,out_dir,accelerator):
     if accelerator is None:
         accelerator=Accelerator()
     test_result_dir=os.path.join(out_dir,"test_result.jsonl")
@@ -488,6 +486,19 @@ def test(test_loader,model_dir,adapter_dir,out_dir,accelerator):
     model=accelerator.prepare(model)
     tokenizer=processor.tokenizer
     model.eval()
+    # 每次测试重新初始化输出列表和指标计数。
+    pred_texts_list = []
+    gold_texts_list = []
+    bad_pred_bbox = 0
+    gmner_correct = 0
+    gmner_pred = 0
+    gmner_gold = 0
+    mner_correct = 0
+    mner_pred = 0
+    mner_gold = 0
+    eeg_correct = 0
+    eeg_pred = 0
+    eeg_gold = 0
     with torch.inference_mode():
         test_progress_bar = tqdm(
             enumerate(test_loader),
@@ -495,12 +506,12 @@ def test(test_loader,model_dir,adapter_dir,out_dir,accelerator):
             desc=f"Test",
             disable=not accelerator.is_main_process
             )
-        for test_batch in test_progress_bar:
+        for batch_idx, test_batch in test_progress_bar:
             vision_input = {}
                     for k in ["pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"]:
                         if k in test_batch:
                             vision_input[k] = test_batch[k]
-                    generated_ids = model.generate(
+            generated_ids = model.generate(
                         input_ids=test_batch["prompt_input_ids"],
                         attention_mask=test_batch["prompt_attention_mask"],
                         **vision_input,
@@ -510,12 +521,12 @@ def test(test_loader,model_dir,adapter_dir,out_dir,accelerator):
                         pad_token_id=tokenizer.pad_token_id,
                         eos_token_id=tokenizer.eos_token_id,
                         )
-                    generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(dev_batch["prompt_input_ids"], generated_ids)]     
-                    response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-                    gold_texts = dev_batch["gold_texts"]
-                    pred_texts_list.extend(response)
-                    gold_texts_list.extend(gold_texts)
-                    for pred_text, gold_text in zip(response, gold_texts):
+            generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(test_batch["prompt_input_ids"], generated_ids)]     
+            response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+            gold_texts = test_batch["gold_texts"]
+            pred_texts_list.extend(response)
+            gold_texts_list.extend(gold_texts)
+            for pred_text, gold_text in zip(response, gold_texts):
                         pred_text = (pred_text or "").strip()
                         gold_text = (gold_text or "").strip()
                         gold_ans=extract_answer_text(gold_text)
@@ -548,14 +559,6 @@ def test(test_loader,model_dir,adapter_dir,out_dir,accelerator):
             "eeg":eeg_metric,
         }
 
-            
-
-
-    
-
-    
-
-    
 
 def save_best_adapter(
     best_checkpoint_dir,
