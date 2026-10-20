@@ -81,17 +81,16 @@ class Qwen25VLSFTCollator:
                 max_pixels=self.max_pixels,
                 factor=self.factor)
             except ValueError as exc:
-                print(f"[WARNING] skip sample: {exc}")
-                continue
+                raise ValueError(f"Invalid sample; fix the dataset before training: {exc}") from exc
             if scale_answer is None:
-                continue
+                raise ValueError("Invalid sample: bbox rescaling failed; samples must not be skipped")
             valid_batch.append(item)
             images.append(image)
             scaled_assistant_texts.append(scale_answer)
             orig_assistant_texts.append(item["assistant_text"])
             orig_sizes.append((orig_w,orig_h))
         if not valid_batch:
-            return None
+            raise ValueError("Empty batch; samples must not be skipped")
         return {
             "images": images,
             "scaled_assistant_texts": scaled_assistant_texts,
@@ -202,8 +201,6 @@ class Qwen25VLSFTCollator:
         batch: List[Dict[str, Any]],
     )->Optional[Dict[str, Any]]:
         prepared = self._prepare_valid_batch(batch)
-        if prepared is None:
-            return None
         prompt_texts, full_texts = self._build_template_texts(prepared)
         full_inputs, prompt_inputs = self._encode_texts_and_images(
         prompt_texts=prompt_texts,
