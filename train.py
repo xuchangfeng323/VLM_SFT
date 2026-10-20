@@ -302,7 +302,10 @@ def main():
                     attention_mask=batch["attention_mask"],
                     labels=batch["labels"],
                     **vision_input).loss
-                accelerator.backward(loss)
+                # Accelerator divides by the configured accumulation size internally.
+                window_start = (step // args.grad_accum_steps) * args.grad_accum_steps
+                window_size = min(args.grad_accum_steps, len(train_loader) - window_start)
+                accelerator.backward(loss * (args.grad_accum_steps / window_size))
                 if args.max_grad_norm > 0.0 and accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(trainable_params, max_norm=args.max_grad_norm)
                 optimizer.step()
