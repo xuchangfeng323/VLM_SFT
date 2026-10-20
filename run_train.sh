@@ -3,12 +3,12 @@ set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
 PYTHON_BIN=${PYTHON_BIN:-/home/xuchangfeng/.conda/envs/e2e/bin/python}
-MODEL_NAME=${MODEL_NAME:-/home/model/Qwen2.5-VL-7B-Instruct}
+MODEL_NAME=${MODEL_NAME:-/home/model/Qwen2.5-VL-3B-Instruct}
 TRAIN_JSONL=${TRAIN_JSONL:-data/sft/train_sft.jsonl}
 DEV_JSONL=${DEV_JSONL:-data/sft/dev_sft.jsonl}
 TEST_JSONL=${TEST_JSONL:-data/sft/test_sft.jsonl}
 IMAGE_ROOT=${IMAGE_ROOT:-data}
-OUTPUT_DIR=${OUTPUT_DIR:-outputs/exp_cot}
+OUTPUT_DIR=${OUTPUT_DIR:-outputs/exp_3b_instruct}
 GPUS=${GPUS:-0}  # nvidia-smi 中的 GPU 编号，例如 1 或 0,1
 MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-29500}
 
@@ -29,7 +29,7 @@ fi
 
 "$PYTHON_BIN" -m accelerate.commands.launch \
   --num_processes "$NUM_PROCESSES" \
-  --gpu_ids all \
+  --gpu_ids 1\
   --main_process_port "$MAIN_PROCESS_PORT" \
   --mixed_precision bf16 \
   --dynamo_backend no \

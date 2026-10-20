@@ -376,8 +376,18 @@ def main():
             else:
                 pass
     if test_dataset is not None:
-        del model
+        accelerator.wait_for_everyone()
+        optimizer.zero_grad(set_to_none=True)
+        # Drop parameter lists, the last autograd graph/batch and training loaders.
+        del optimizer, scheduler, trainable_params, optimizer_grouped_parameters
+        del loss, loss_for_log, batch, vision_input, progress_bar, p
+        del train_loader, dev_loader, model
+        # Clear Accelerator's registries, then collect cycles and release cached blocks.
+        accelerator.free_memory()
         gc.collect()
+        if is_cuda_device:
+            torch.cuda.empty_cache()
+        accelerator.wait_for_everyone()
         test_result = test(args, test_loader, args.model_name, best_checkpoint, args.output_dir, accelerator)
         if accelerator.is_main_process:
             serializable_result = {name: asdict(metric) for name, metric in test_result.items()}
