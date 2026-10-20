@@ -41,9 +41,9 @@ fi
   --test_jsonl "$TEST_JSONL" \
   --image_root "$IMAGE_ROOT" \
   --output_dir "$OUTPUT_DIR" \
-  --epochs 10 \
+  --epochs 5 \
   --batch_size 2 \
-  --grad_accum_steps 8 \
+  --grad_accum_steps 4 \
   --lr 5e-4 \
   --weight_decay 0.1 \
   --warmup_ratio 0.03 \
@@ -57,4 +57,5 @@ fi
   --test_batch_size 2 \
   --eval_max_new_tokens 512 \
   --eval_iou 0.5 \
-  --num_workers 4
+  --num_workers 4 \
+  --use_swanlab \
