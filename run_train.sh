@@ -9,7 +9,7 @@ DEV_JSONL=${DEV_JSONL:-data/sft/dev_sft.jsonl}
 TEST_JSONL=${TEST_JSONL:-data/sft/test_sft.jsonl}
 IMAGE_ROOT=${IMAGE_ROOT:-data}
 OUTPUT_DIR=${OUTPUT_DIR:-outputs/exp_3b_instruct}
-GPUS=${GPUS:-0}  # nvidia-smi 中的 GPU 编号，例如 1 或 0,1
+GPUS=${GPUS:-1}  # nvidia-smi 中的 GPU 编号，例如 1 或 0,1
 MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT:-29500}
 
 # 在 Accelerate 派生进程前检查，避免覆盖已有实验输出。
@@ -53,8 +53,8 @@ fi
   --lora_r 32 \
   --lora_alpha 64 \
   --lora_dropout 0.05 \
-  --dev_batch_size 2 \
-  --test_batch_size 2 \
+  --dev_batch_size 4\
+  --test_batch_size 4 \
   --eval_max_new_tokens 512 \
   --eval_iou 0.5 \
   --num_workers 4 \
