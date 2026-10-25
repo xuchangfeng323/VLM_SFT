@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional, Tuple
 from geometry import rescale_assistant_text_bboxes
+from utils import extract_answer_text
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are an information extraction assistant for grounded "
@@ -22,10 +23,12 @@ class Qwen25VLSFTCollator:
     min_pixels=None,
     max_pixels=None,
     factor=28,
-    system_prompt=DEFAULT_SYSTEM_PROMPT):
+    system_prompt=DEFAULT_SYSTEM_PROMPT,
+    skip_small_images=False):
         self.processor = processor
         self.max_length = max_length
         self.factor = factor
+        self.skip_small_images = skip_small_images
         self.system_prompt = system_prompt
         if self.system_prompt is None:
             self.system_prompt = DEFAULT_SYSTEM_PROMPT
@@ -72,6 +75,12 @@ class Qwen25VLSFTCollator:
         for item in batch:
             image= item["image"]
             orig_w,orig_h=image.size
+            # Match E2E's resize rejection without removing source indices from
+            # the sampler: the other examples retain the same microbatch layout.
+            answer = extract_answer_text(item["assistant_text"])
+            if (self.skip_small_images and min(orig_w, orig_h) < self.factor
+                    and answer and answer.lower() != "none"):
+                continue
         
             try:
                 scale_answer=rescale_assistant_text_bboxes(item["assistant_text"],
@@ -90,6 +99,8 @@ class Qwen25VLSFTCollator:
             orig_assistant_texts.append(item["assistant_text"])
             orig_sizes.append((orig_w,orig_h))
         if not valid_batch:
+            if self.skip_small_images:
+                return None
             raise ValueError("Empty batch; samples must not be skipped")
         return {
             "images": images,
@@ -201,6 +212,8 @@ class Qwen25VLSFTCollator:
         batch: List[Dict[str, Any]],
     )->Optional[Dict[str, Any]]:
         prepared = self._prepare_valid_batch(batch)
+        if prepared is None:
+            return None
         prompt_texts, full_texts = self._build_template_texts(prepared)
         full_inputs, prompt_inputs = self._encode_texts_and_images(
         prompt_texts=prompt_texts,

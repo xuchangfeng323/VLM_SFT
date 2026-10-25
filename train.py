@@ -4,14 +4,11 @@ import os
 import swanlab
 import random
 from datetime import datetime
-from accelerate.tracking import SwanLabTracker
 from tqdm.auto import tqdm
 from typing import Optional
 from dataprocess import TwitterGroundedMNERJsonl
 import numpy as np
 import torch
-from accelerate import Accelerator
-from accelerate.utils import broadcast_object_list
 from collator import Qwen25VLSFTCollator
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader
@@ -82,6 +79,9 @@ def main():
     parser.add_argument("--lora_alpha", type=int, default=64)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--bfloat16", action="store_true")
+    parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--eval_precision", choices=("bf16", "no"), default=None,
+                        help="Evaluation autocast only; training autocast stays disabled.")
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument(
         "--lora_target_modules",
@@ -111,16 +111,22 @@ def main():
     args = parser.parse_args()
     if args.epochs <= 0 or args.grad_accum_steps <= 0:
         parser.error("--epochs and --grad_accum_steps must be positive")
-    accelerator = Accelerator( gradient_accumulation_steps=args.grad_accum_steps)
+    if int(os.environ.get("WORLD_SIZE", "1")) != 1:
+        parser.error("This training entry point uses one device; launch it with python train.py")
+    device = torch.device(args.device)
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+    args.eval_precision = args.eval_precision or ("bf16" if args.bfloat16 else "no")
     use_swanlab = args.use_swanlab
-    if use_swanlab and accelerator.is_main_process:
+    if use_swanlab:
         swanlab.init(
             project="qwenvl4gmner",
             name=(
                 f"{args.model_name.rstrip('/').split('/')[-1]}"
                 f"-LoRA-r{args.lora_r}"
                 f"-lr{args.lr}"
-                f"-seed{args.seed}"
+                f"-seed{args.seed}"+
+                datetime.now().strftime("%Y%m%d%H%M%S")
 
             ),
             config={
@@ -139,8 +145,11 @@ def main():
                 "seed": args.seed,
 
                 # 运行环境
-                "device": str(accelerator.device),
-                "num_processes": accelerator.num_processes,
+                "device": str(device),
+                "num_processes": 1,
+                "training_autocast": False,
+                "lora_dtype": "float32",
+                "eval_precision": args.eval_precision,
                 "num_workers": args.num_workers,
 
                 # 数据与图片
@@ -173,13 +182,13 @@ def main():
         torch.manual_seed(worker_seed)
     log_path = os.path.join(args.output_dir, "log.jsonl")
     best_checkpoint = os.path.join(args.output_dir, "best_model")
-    if accelerator.is_main_process:
-        os.makedirs(args.output_dir, exist_ok=False)
-        with open(log_path, "x", encoding="utf-8"):
-            pass
-    accelerator.wait_for_everyone()
+    os.makedirs(args.output_dir, exist_ok=False)
+    with open(log_path, "x", encoding="utf-8"):
+        pass
+    with open(os.path.join(args.output_dir, "args.json"), "w", encoding="utf-8") as f:
+        json.dump(vars(args), f, ensure_ascii=False, indent=2)
     
-    is_cuda_device = torch.cuda.is_available()
+    is_cuda_device = device.type == "cuda"
     g = torch.Generator()
     g.manual_seed(args.seed) 
     processor = AutoProcessor.from_pretrained(
@@ -196,6 +205,15 @@ def main():
         factor=28,
         system_prompt=args.system_prompt,
     )
+    train_collator = Qwen25VLSFTCollator(
+        processor=processor,
+        max_length=args.max_length,
+        min_pixels=args.min_pixels,
+        max_pixels=args.max_pixels,
+        factor=28,
+        system_prompt=args.system_prompt,
+        skip_small_images=True,
+    )
     tokenizer = processor.tokenizer
     train_dataset = TwitterGroundedMNERJsonl(args.train_jsonl, image_root=args.image_root)
     dev_dataset = TwitterGroundedMNERJsonl(args.dev_jsonl, image_root=args.image_root)
@@ -205,7 +223,8 @@ def main():
     )
     prevalidate_datasets(
         {"train": train_dataset, "dev": dev_dataset, "test": test_dataset},
-        collator, accelerator,
+        {"train": train_collator, "dev": collator, "test": collator},
+        output_dir=args.output_dir,
     )
     loader_kwargs = dict(
         num_workers=args.num_workers,
@@ -215,18 +234,20 @@ def main():
         generator=g,
         persistent_workers=(args.num_workers > 0),
     )
-    train_loader = accelerator.prepare(DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True, **loader_kwargs
-    ))
-    dev_loader = accelerator.prepare(DataLoader(
+    train_loader = DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True,
+        **{**loader_kwargs, "collate_fn": train_collator},
+    )
+    dev_loader = DataLoader(
         dev_dataset, batch_size=args.dev_batch_size, shuffle=False, **loader_kwargs
-    ))
+    )
     test_loader = None
     if test_dataset is not None:
-        test_loader = accelerator.prepare(DataLoader(
+        test_loader = DataLoader(
             test_dataset, batch_size=args.test_batch_size, shuffle=False, **loader_kwargs
-        ))
+        )
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.model_name, dtype=torch.bfloat16 if args.bfloat16 else None, trust_remote_code=True)
+    model = model.to(device)
     for p in model.parameters():
         p.requires_grad = False
     if hasattr(model, "config") and hasattr(model.config, "use_cache"):
@@ -242,18 +263,18 @@ def main():
         bias="none",
         target_modules=target,
     )
-    model = get_peft_model(model, lora_cfg)
+    model = get_peft_model(model, lora_cfg, autocast_adapter_dtype=True)
     if args.grad_ckpt and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
     if hasattr(model, "config") and hasattr(model.config, "use_cache"):
         model.config.use_cache = False
-    if accelerator.is_main_process:
-        model.print_trainable_parameters()
-    model = accelerator.prepare(model)
+    model.print_trainable_parameters()
     model.train()
     trainable_params = [p for p in model.parameters() if p.requires_grad]#可训练参数
+    if not trainable_params or any(p.dtype != torch.float32 for p in trainable_params):
+        raise RuntimeError("Training requires FP32 trainable LoRA weights")
 
     decay_params = [n for n, p in model.named_parameters() if "bias" not in n and "norm" not in n]
     optimizer_grouped_parameters = [
@@ -271,96 +292,123 @@ def main():
     total_steps = steps_per_epoch * args.epochs
     warmup_steps = int(total_steps * args.warmup_ratio)
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
-    optimizer = accelerator.prepare(optimizer)
+    with open(os.path.join(args.output_dir, "runtime.json"), "w", encoding="utf-8") as f:
+        json.dump({"torch": torch.__version__, "device": str(device),
+                   "training_autocast": False, "lora_dtype": "torch.float32",
+                   "eval_precision": args.eval_precision, "total_steps": total_steps,
+                   "warmup_steps": warmup_steps,
+                   "generation_config": model.generation_config.to_dict()}, f, indent=2)
     best_dev_gmner_f1=-1
     early_stop_counter=0
+    global_step=0
     for epoch in range(args.epochs):
         model.train()
         
         if is_cuda_device:
             torch.cuda.empty_cache()
-        model_config = getattr(accelerator.unwrap_model(model), "config", None)
+        model_config = getattr(model, "config", None)
         if model_config is not None and hasattr(model_config, "use_cache"):
             model_config.use_cache = False
         progress_bar = tqdm(
         enumerate(train_loader),
         total=len(train_loader),
         desc=f"Epoch {epoch + 1}/{args.epochs}",
-        disable=not accelerator.is_main_process
         )
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
+        accum_counter=0
         for step, batch in progress_bar:
-             with accelerator.accumulate(model):
-                if batch is None:
-                    raise ValueError("Training samples must not be skipped after validation")
-                vision_input = {}
-                for k in ["pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"]:
-                    if k in batch:
-                        vision_input[k] = batch[k]
-                loss = model(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                    labels=batch["labels"],
-                    **vision_input).loss
-                # Accelerator divides by the configured accumulation size internally.
-                window_start = (step // args.grad_accum_steps) * args.grad_accum_steps
-                window_size = min(args.grad_accum_steps, len(train_loader) - window_start)
-                accelerator.backward(loss * (args.grad_accum_steps / window_size))
-                if args.max_grad_norm > 0.0 and accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(trainable_params, max_norm=args.max_grad_norm)
+            if batch is None:
+                continue
+            for k, v in list(batch.items()):
+                if torch.is_tensor(v):
+                    batch[k] = v.to(device, non_blocking=True)
+            del v
+            vision_input = {}
+            for k in ["pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"]:
+                if k in batch:
+                    vision_input[k] = batch[k]
+            if torch.is_autocast_enabled(device.type):
+                raise RuntimeError("Training autocast must stay disabled")
+            out = model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                labels=batch["labels"],
+                use_cache=False,
+                **vision_input)
+            loss = out.loss / args.grad_accum_steps
+            if not torch.isfinite(loss):
+                raise FloatingPointError(f"Non-finite loss at epoch={epoch + 1}, step={step}")
+            loss_for_log = loss.detach().float() * args.grad_accum_steps
+            mean_loss = loss_for_log.item()
+            # Native backward: divide once, and count only non-empty microbatches.
+            loss.backward()
+            accum_counter += 1
+            if accum_counter == args.grad_accum_steps:
+                if args.max_grad_norm > 0.0:
+                    torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm,
+                                                   error_if_nonfinite=True)
                 optimizer.step()
-                if accelerator.sync_gradients and not optimizer.step_was_skipped:
-                    scheduler.step()
-                optimizer.zero_grad()
-                loss_for_log = loss.detach().float()
-                if accelerator.sync_gradients:
-                    loss_for_log = loss.detach().float()
-                    mean_loss = accelerator.reduce(
-                                    loss_for_log,
-                                    reduction="mean",
-                                ).item()
-                    if accelerator.is_main_process:
-                        progress_bar.set_postfix(
-                            loss=f"{mean_loss:.4f}",
-                            lr=f"{scheduler.get_last_lr()[0]:.2e}"
-                        )
-                        if use_swanlab:
-                            swanlab.log({
-                                "loss": mean_loss,
-                                "lr": scheduler.get_last_lr()[0],
-                            })
+                optimizer.zero_grad(set_to_none=True)
+                scheduler.step()
+                accum_counter=0
+                global_step+=1
+                progress_bar.set_postfix(
+                    loss=f"{mean_loss:.4f}",
+                    lr=f"{scheduler.get_last_lr()[0]:.2e}"
+                )
+                if use_swanlab:
+                    swanlab.log({"loss": mean_loss, "lr": scheduler.get_last_lr()[0]})
+            batch.clear()
+            del out, loss, loss_for_log, batch, vision_input
 
-        model_config = getattr(accelerator.unwrap_model(model), "config", None)
+        # Normalize the final short window before gradient clipping.
+        if accum_counter > 0:
+            for parameter in trainable_params:
+                if parameter.grad is not None:
+                    parameter.grad.mul_(args.grad_accum_steps / float(accum_counter))
+            del parameter
+            if args.max_grad_norm > 0.0:
+                torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm,
+                                               error_if_nonfinite=True)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            scheduler.step()
+            global_step+=1
+            if use_swanlab:
+                swanlab.log({"loss": mean_loss, "lr": scheduler.get_last_lr()[0]})
+
+        model_config = getattr(model, "config", None)
         if model_config is not None and hasattr(model_config, "use_cache"):
             model_config.use_cache = True
         
         dev_result = evaluate(
-            args, dev_loader, model, tokenizer, accelerator, "dev",
+            args, dev_loader, model, tokenizer, device, "dev",
             response_path=os.path.join(args.output_dir, f"dev_{epoch + 1}.jsonl"),
         )
         gmner_metric = dev_result["gmner"]
         mner_metric = dev_result["mner"]
         eeg_metric = dev_result["eeg"]
-        if accelerator.is_main_process:
-            if use_swanlab :
-                swanlab.log({
-                    "gmner_f1": gmner_metric.f1,
-                    "mner_f1": mner_metric.f1,
-                    "eeg_f1": eeg_metric.f1,
-                                })
-            log_record={
+        if use_swanlab :
+            swanlab.log({
                 "gmner_f1": gmner_metric.f1,
-                "gmner_p": gmner_metric.p,
-                "gmner_r": gmner_metric.r,
                 "mner_f1": mner_metric.f1,
-                "mner_p": mner_metric.p,
-                "mner_r": mner_metric.r,
                 "eeg_f1": eeg_metric.f1,
-                "eeg_p": eeg_metric.p,
-                "eeg_r": eeg_metric.r,
-                        }
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(log_record, ensure_ascii=False) + "\n")
+                            })
+        log_record={
+            "gmner_f1": gmner_metric.f1,
+            "gmner_p": gmner_metric.p,
+            "gmner_r": gmner_metric.r,
+            "mner_f1": mner_metric.f1,
+            "mner_p": mner_metric.p,
+            "mner_r": mner_metric.r,
+            "eeg_f1": eeg_metric.f1,
+            "eeg_p": eeg_metric.p,
+            "eeg_r": eeg_metric.r,
+            "epoch": epoch + 1,
+            "global_step": global_step,
+                    }
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_record, ensure_ascii=False) + "\n")
         if best_dev_gmner_f1 < gmner_metric.f1:
             best_dev_gmner_f1=gmner_metric.f1
             early_stop_counter=0
@@ -368,35 +416,28 @@ def main():
                     best_checkpoint,
                     model,
                     processor,
-                    accelerator,
                 )
         else :
             early_stop_counter+=1
             if early_stop_counter>=args.patience:
-                if accelerator.is_main_process:
-                    print("Early stop")
+                print("Early stop")
                 break
             else:
                 pass
     if test_dataset is not None:
-        accelerator.wait_for_everyone()
         optimizer.zero_grad(set_to_none=True)
-        # Drop parameter lists, the last autograd graph/batch and training loaders.
+        # Release training owners before loading the saved best adapter for test.
         del optimizer, scheduler, trainable_params, optimizer_grouped_parameters
-        del loss, loss_for_log, batch, vision_input, progress_bar, p
+        del progress_bar, p
         del train_loader, dev_loader, model
-        # Clear Accelerator's registries, then collect cycles and release cached blocks.
-        accelerator.free_memory()
         gc.collect()
         if is_cuda_device:
             torch.cuda.empty_cache()
-        accelerator.wait_for_everyone()
-        test_result = test(args, test_loader, args.model_name, best_checkpoint, args.output_dir, accelerator)
-        if accelerator.is_main_process:
-            serializable_result = {name: asdict(metric) for name, metric in test_result.items()}
-            with open(os.path.join(args.output_dir, "test_result.jsonl"), "a", encoding="utf-8") as f:
-                f.write(json.dumps(serializable_result, ensure_ascii=False) + "\n")
-        if use_swanlab and accelerator.is_main_process:
+        test_result = test(args, test_loader, args.model_name, best_checkpoint, args.output_dir, device)
+        serializable_result = {name: asdict(metric) for name, metric in test_result.items()}
+        with open(os.path.join(args.output_dir, "test_result.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(serializable_result, ensure_ascii=False) + "\n")
+        if use_swanlab:
             swanlab.log(
                 {
                     "test_gmner_f1": test_result["gmner"].f1,
@@ -410,66 +451,80 @@ def main():
                     "test_eeg_r": test_result["eeg"].r,
                 }
             )
+    if use_swanlab:
+        swanlab.finish()
         
-def prevalidate_datasets(datasets, collator, accelerator):
-    """Validate the fixed sample set once; every rank receives the same failure."""
-    error = [None]
-    if accelerator.is_main_process:
-        try:
-            for split, dataset in datasets.items():
-                if dataset is None:
-                    continue
-                if len(dataset) == 0:
-                    raise ValueError(f"{split} dataset is empty")
-                for index in tqdm(range(len(dataset)), desc=f"Validate {split}"):
-                    try:
-                        sample = dataset[index]
-                        try:
-                            sample["image"].load()
-                            # Uses exactly the same bbox validation as collation.
-                            collator._prepare_valid_batch([sample])
-                        finally:
-                            sample["image"].close()
-                    except Exception as exc:
-                        raise ValueError(f"{split} sample index {index}: {exc}") from exc
-        except Exception as exc:
-            error[0] = f"Dataset validation failed: {exc}"
-    broadcast_object_list(error)
-    if error[0] is not None:
-        raise ValueError(error[0])
+def prevalidate_datasets(datasets, collator, output_dir=None):
+    """Validate samples and record small-image exclusions without changing sampler indices."""
+    manifest = {}
+    for split, dataset in datasets.items():
+        if dataset is None:
+            continue
+        if len(dataset) == 0:
+            raise ValueError(f"{split} dataset is empty")
+        split_collator = collator[split] if isinstance(collator, dict) else collator
+        excluded = []
+        for index in tqdm(range(len(dataset)), desc=f"Validate {split}"):
+            sample = None
+            try:
+                sample = dataset[index]
+                sample["image"].load()
+                if split_collator._prepare_valid_batch([sample]) is None:
+                    item = dataset.items[index]
+                    excluded.append({"index": index, "id": item.get("id", index),
+                                     "image": item["images"][0],
+                                     "size": list(sample["image"].size)})
+            except Exception as exc:
+                raise ValueError(f"{split} sample index {index}: {exc}") from exc
+            finally:
+                if sample is not None:
+                    sample["image"].close()
+        if len(excluded) == len(dataset):
+            raise ValueError(f"{split} has no valid samples")
+        manifest[split] = {"source_samples": len(dataset),
+                           "effective_samples": len(dataset) - len(excluded), "excluded": excluded}
+    if output_dir is not None:
+        with open(os.path.join(output_dir, "data_manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+    return manifest
 
 
-def evaluate(args, dataloader, model, tokenizer, accelerator, split, response_path=None):
-    """Gather per-sample counts before computing global micro-averaged metrics."""
+def evaluate(args, dataloader, model, tokenizer, device, split, response_path=None):
+    """Compute the original micro-averaged metrics on one device."""
     model.eval()
-    eval_model = accelerator.unwrap_model(model)
+    eval_model = model
     totals = torch.zeros(9, dtype=torch.long, device="cpu")
     sample_count = 0
-    if response_path is not None and accelerator.is_main_process:
-        # Output directory already exists; only rank 0 initializes/writes this file.
+    if response_path is not None:
         with open(response_path, "w", encoding="utf-8"):
             pass
-    progress = tqdm(dataloader, total=len(dataloader), desc=split,
-                    disable=not accelerator.is_main_process)
+    progress = tqdm(dataloader, total=len(dataloader), desc=split)
     with torch.inference_mode():
         for batch in progress:
             if batch is None:
                 raise ValueError(f"{split}: empty batch; samples must not be skipped")
+            for k, v in list(batch.items()):
+                if torch.is_tensor(v):
+                    batch[k] = v.to(device, non_blocking=True)
             vision_inputs = {
                 key: batch[key]
                 for key in ("pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw")
                 if key in batch
             }
-            generated_ids = eval_model.generate(
-                input_ids=batch["prompt_input_ids"],
-                attention_mask=batch["prompt_attention_mask"],
-                **vision_inputs,
-                max_new_tokens=args.eval_max_new_tokens,
-                use_cache=True,
-                do_sample=False,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
+            # BF16 autocast is explicit and limited to evaluation.
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16,
+                                enabled=device.type == "cuda" and args.eval_precision == "bf16"):
+                generated_ids = eval_model.generate(
+                    input_ids=batch["prompt_input_ids"],
+                    attention_mask=batch["prompt_attention_mask"],
+                    **vision_inputs,
+                    max_new_tokens=args.eval_max_new_tokens,
+                    use_cache=True,
+                    do_sample=False,
+                    num_beams=1,
+                    no_repeat_ngram_size=0,
+                    pad_token_id=tokenizer.pad_token_id,
+                )
             prompt_width = batch["prompt_input_ids"].shape[1]
             responses = tokenizer.batch_decode(
                 generated_ids[:, prompt_width:], skip_special_tokens=True
@@ -497,19 +552,15 @@ def evaluate(args, dataloader, model, tokenizer, accelerator, split, response_pa
                         "pred_triples": [asdict(triple) for triple in preds],
                         "gold_triples": [asdict(triple) for triple in golds],
                     })
-            # Called inside the loader iteration so Accelerate knows the final-batch
-            # remainder and removes padded duplicates. All ranks receive the result.
-            # Gather Python objects so count tensors and arithmetic stay on CPU.
-            rows = accelerator.gather_for_metrics(rows, use_gather_object=True)
             counts = torch.tensor(rows, dtype=torch.long, device="cpu")
             totals += counts.sum(dim=0)
             sample_count += counts.shape[0]
             if response_path is not None:
-                records = accelerator.gather_for_metrics(records, use_gather_object=True)
-                if accelerator.is_main_process:
-                    with open(response_path, "a", encoding="utf-8") as output:
-                        for record in records:
-                            output.write(json.dumps(record, ensure_ascii=False) + "\n")
+                with open(response_path, "a", encoding="utf-8") as output:
+                    for record in records:
+                        output.write(json.dumps(record, ensure_ascii=False) + "\n")
+            batch.clear()
+            del generated_ids, vision_inputs, batch
     if sample_count != len(dataloader.dataset):
         raise RuntimeError(
             f"{split}: evaluated {sample_count} samples, expected {len(dataloader.dataset)}"
@@ -519,24 +570,20 @@ def evaluate(args, dataloader, model, tokenizer, accelerator, split, response_pa
         task: prf(*values[offset:offset + 3], task)
         for task, offset in (("gmner", 0), ("mner", 3), ("eeg", 6))
     }
-    if accelerator.is_main_process:
-        for task, metric in result.items():
-            print(f"{split} {task.upper()} P: {metric.p:.4f}, R: {metric.r:.4f}, F1: {metric.f1:.4f}")
+    for task, metric in result.items():
+        print(f"{split} {task.upper()} P: {metric.p:.4f}, R: {metric.r:.4f}, F1: {metric.f1:.4f}")
     return result
 
 
-def test(args, test_loader, model_dir, adapter_dir, out_dir, accelerator):
-    if accelerator is None:
-        accelerator = Accelerator()
-        test_loader = accelerator.prepare(test_loader)
+def test(args, test_loader, model_dir, adapter_dir, out_dir, device):
     processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
     base_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         model_dir, dtype=torch.bfloat16 if args.bfloat16 else None, trust_remote_code=True
     )
-    model = PeftModel.from_pretrained(base_model, adapter_dir)
-    model = accelerator.prepare(model)
+    base_model = base_model.to(device)
+    model = PeftModel.from_pretrained(base_model, adapter_dir, autocast_adapter_dtype=True)
     return evaluate(
-        args, test_loader, model, processor.tokenizer, accelerator, "test",
+        args, test_loader, model, processor.tokenizer, device, "test",
         response_path=os.path.join(out_dir, "test_response.jsonl"),
     )
 
@@ -545,31 +592,14 @@ def save_best_adapter(
     best_checkpoint_dir,
     model,
     processor,
-    accelerator,
 ):
-    accelerator.wait_for_everyone()
-
-    if accelerator.is_main_process:
-        os.makedirs(best_checkpoint_dir, exist_ok=True)
-
-    accelerator.wait_for_everyone()
-
-    unwrapped_model = accelerator.unwrap_model(model)
-    state_dict = accelerator.get_state_dict(model)
-
-    unwrapped_model.save_pretrained(
+    os.makedirs(best_checkpoint_dir, exist_ok=True)
+    model.save_pretrained(
         best_checkpoint_dir,
-        is_main_process=accelerator.is_main_process,
-        save_function=accelerator.save,
-        state_dict=state_dict,
         safe_serialization=True,
     )
-
-    if accelerator.is_main_process:
-        processor.save_pretrained(best_checkpoint_dir)
-        print(f"Best adapter saved to: {best_checkpoint_dir}")
-
-    accelerator.wait_for_everyone()
+    processor.save_pretrained(best_checkpoint_dir)
+    print(f"Best adapter saved to: {best_checkpoint_dir}")
 
 def reord_respone(
     response:str,
